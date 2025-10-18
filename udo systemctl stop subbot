@@ -1,0 +1,13 @@
+[0;1;32m●[0m subbot.service - Telegram SubBot Service for /opt/beget/bots/subbot
+     Loaded: loaded (/etc/systemd/system/subbot.service; enabled; vendor preset: enabled)
+     Active: [0;1;32mactive (running)[0m since Tue 2025-04-15 07:08:03 UTC; 8min ago
+   Main PID: 1820383 (python)
+      Tasks: 2 (limit: 1101)
+     Memory: 154.6M
+        CPU: 4.976s
+     CGroup: /system.slice/subbot.service
+             └─1820383 /opt/beget/bots/subbot/venv/bin/python -m bot
+
+Apr 15 07:08:03 wiypsrjkqm systemd[1]: Stopped Telegram SubBot Service for /opt/beget/bots/subbot.
+Apr 15 07:08:03 wiypsrjkqm systemd[1]: subbot.service: Consumed 4.419s CPU time.
+Apr 15 07:08:03 wiypsrjkqm systemd[1]: Started Telegram SubBot Service for /opt/beget/bots/subbot.
