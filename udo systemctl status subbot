@@ -1,9 +1,0 @@
-● telegrambot.service - Telegram Subscription Check Bot
-     Loaded: loaded (/etc/systemd/system/telegrambot.service; enabled; vendor preset: enabled)
-     Active: activating (auto-restart) (Result: exit-code) since Tue 2025-04-15 07:21:27 UTC; 5s ago
-    Process: 1829111 ExecStart=/opt/beget/bots/subbot/venv/bin/python3 /opt/beget/bots/subbot/main.py [0;1;31m(code=exited, status=2)[0m
-   Main PID: 1829111 (code=exited, status=2)
-        CPU: 39ms
-
-Apr 15 07:21:27 wiypsrjkqm systemd[1]: [0;1;39m[0;1;31m[0;1;39mtelegrambot.service: Main process exited, code=exited, status=2/INVALIDARGUMENT[0m
-Apr 15 07:21:27 wiypsrjkqm systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mtelegrambot.service: Failed with result 'exit-code'.[0m

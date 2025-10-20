@@ -1,491 +1,540 @@
 /**
  * @file Code.gs
- * @description All-in-one script for a Telegram subscription and CAPTCHA bot.
+ * @description Advanced, robust, all-in-one script for a Telegram subscription and CAPTCHA bot.
+ * This is the full, readable, and final version of the code, implementing all features from first_todo.md.
  */
 
 // =================================================================================
-// 1. GLOBAL CONFIGURATION & WEBHOOK ENTRY POINT
+// ===================  A. SCRIPT-WIDE DEFAULTS & CONSTANTS  =====================
 // =================================================================================
 
-// ---!!! IMPORTANT: PASTE YOUR DETAILS HERE !!!---
-const BOT_TOKEN = 'YOUR_BOT_TOKEN'; // <-- 1. Get this from @BotFather
-const WEB_APP_URL = 'YOUR_WEB_APP_URL'; // <-- 2. Get this after deploying the script
+/**
+ * Default configuration. Used as a fallback if the 'Config' sheet is missing or a key is not found.
+ * This ensures the bot remains operational even with a misconfigured sheet.
+ */
+const DEFAULT_CONFIG = {
+  bot_enabled: true,
+  target_channel_id: "", // IMPORTANT: Must be a numeric ID (e.g., -100123456789)
+  authorized_chat_ids: "", // List of chat IDs where the bot should operate, one per line
+  admin_id: "", // Your personal Telegram ID for critical error notifications
+  captcha_mute_duration_min: 5,
+  captcha_message_timeout_sec: 300,
+  warning_message_timeout_sec: 30,
+  violation_limit: 3,
+  mute_level_1_duration_min: 60,
+  mute_level_2_duration_min: 1440, // 24 hours
+  mute_level_3_duration_min: 10080, // 7 days
+  texts: {
+    captcha_text: "{user_mention}, добро пожаловать! Чтобы писать в чат, подтвердите, что вы не робот.",
+    sub_warning_text: "{user_mention}, чтобы отправлять сообщения в этот чат, вы должны быть подписаны на наш канал.",
+    sub_mute_text: "{user_mention} был заглушен на {duration} минут за отказ от подписки на канал."
+  }
+};
 
-const TELEGRAM_API_URL = 'https://api.telegram.org/bot' + BOT_TOKEN;
+/** System user IDs to always ignore. 136817688 is "Group" (anonymous admin), 777000 is "Telegram" (channel posts). */
+const IGNORED_USER_IDS = ['136817688', '777000'];
+
+// =================================================================================
+// =================  B. SPREADSHEET UI & MANUAL CONTROLS  =====================
+// =================================================================================
 
 /**
- * Main function that Telegram calls. This is the entry point for all updates.
+ * Creates a custom menu in the spreadsheet UI when the file is opened.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('🤖 Управление ботом')
+    .addItem('▶️ Запустить initialSetup', 'initialSetup')
+    .addSeparator()
+    .addItem('🟢 Включить бота', 'userEnableBot')
+    .addItem('🔴 Выключить бота', 'userDisableBot')
+    .addSeparator()
+    .addItem('🔄 Сбросить кэш (Настройки и Админы)', 'userClearCache')
+    .addToUi();
+}
+
+// Wrapper functions for menu items to provide user feedback.
+function userEnableBot() { enableBot(true); }
+function userDisableBot() { disableBot(true); }
+function userClearCache() { clearCache(true); }
+
+/**
+ * Enables the bot by setting the 'bot_enabled' flag to true.
+ * @param {boolean} showAlert If true, shows a UI alert to the user.
+ */
+function enableBot(showAlert) {
+  updateConfigValue('bot_enabled', true, '🟢 Бот ВКЛЮЧЕН');
+  if (showAlert) {
+    try { SpreadsheetApp.getUi().alert('✅ Бот включен. Он начнет обрабатывать новые события.'); } catch(e) {}
+  }
+}
+
+/**
+ * Disables the bot by setting the 'bot_enabled' flag to false.
+ * @param {boolean} showAlert If true, shows a UI alert to the user.
+ */
+function disableBot(showAlert) {
+  updateConfigValue('bot_enabled', false, '🔴 Бот ВЫКЛЮЧЕН');
+  if (showAlert) {
+    try { SpreadsheetApp.getUi().alert('🛑 Бот выключен. Он больше не будет реагировать на события в чатах.'); } catch(e) {}
+  }
+}
+
+/**
+ * Clears the script cache for configuration and admin lists.
+ * @param {boolean} showAlert If true, shows a UI alert to the user.
+ */
+function clearCache(showAlert) {
+  CacheService.getScriptCache().removeAll(['config', 'admin_cache']);
+  if (showAlert) {
+    try { SpreadsheetApp.getUi().alert('✅ Кэш настроек и администраторов очищен. Новые данные будут загружены из таблицы при следующем событии.'); } catch(e) {}
+  }
+}
+
+/**
+ * Helper to update a specific key-value pair in the 'Config' sheet.
+ */
+function updateConfigValue(key, value, statusText) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const configSheet = ss.getSheetByName('Config');
+    if (!configSheet) return;
+    const data = configSheet.getRange("A:A").getValues().flat();
+    const rowIndex = data.indexOf(key) + 1;
+    if (rowIndex > 0) {
+      configSheet.getRange(rowIndex, 2).setValue(value);
+    } else {
+      configSheet.appendRow([key, value]);
+    }
+    if (statusText) {
+      configSheet.getRange('E1').setValue(statusText).setFontWeight('bold');
+    }
+    clearCache(false); // Clear cache automatically without showing a second popup
+  } catch (e) { logToSheet('ERROR', `Failed to update config value for key: ${key}. Error: ${e.message}`); }
+}
+
+// =================================================================================
+// ==========================  C. INITIAL SETUP WIZARD  ==========================
+// =================================================================================
+
+/**
+ * Performs a full one-time setup of the bot.
+ */
+function initialSetup() {
+  try {
+    _createSheets();
+    _setWebhook();
+    _createTrigger();
+    enableBot(false); // Enable bot logic without showing a popup
+    const successMessage = '🎉 ПОЛНАЯ НАСТРОЙКА ЗАВЕРШЕНА! Ваш бот готов к работе. Не забудьте заполнить `Config` и `Whitelist` листы.';
+    Logger.log(successMessage);
+    try {
+      SpreadsheetApp.getUi().alert(successMessage);
+    } catch(e) {
+      Logger.log("Запущено из редактора, всплывающее окно пропущено.");
+    }
+  } catch (err) {
+    const errorMessage = `ОШИБКА НАСТРОЙКИ: ${err.message}\n\nСтек: ${err.stack}`;
+    Logger.log(errorMessage);
+     try {
+      SpreadsheetApp.getUi().alert(errorMessage);
+    } catch(e) { /* Failsafe for non-UI context */ }
+  }
+}
+
+/**
+ * Creates all necessary sheets with headers and examples.
+ */
+function _createSheets() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = {
+    "Config": [ ["key", "value", "description"], ["bot_enabled", true, "TRUE/FALSE. Управляется через меню."], ["target_channel_id", "-100...", "ЧИСЛОВОЙ ID канала для проверки подписки."], ["authorized_chat_ids", "-100...\n-100...", "ID чатов, где работает бот (каждый с новой строки)"], ["admin_id", "", "Ваш Telegram ID для получения критических ошибок."] ],
+    "Texts": [ ["key", "value"], ["captcha_text", DEFAULT_CONFIG.texts.captcha_text], ["sub_warning_text", DEFAULT_CONFIG.texts.sub_warning_text], ["sub_mute_text", DEFAULT_CONFIG.texts.sub_mute_text] ],
+    "Users": [["user_id", "mute_level", "first_violation_date"]], 
+    "Logs": [["Timestamp", "Level", "Message"]], 
+    "Whitelist": [["user_id_or_channel_id", "comment"], ["12345678", "Пример: другой мой бот"]]
+  };
+  for (const name in sheets) {
+    if (!ss.getSheetByName(name)) {
+      const data = sheets[name];
+      ss.insertSheet(name).getRange(1, 1, data.length, data[0].length).setValues(data).setFontFamily('Roboto');
+    }
+  }
+  Logger.log('✅ (Шаг 1/3) Листы созданы.');
+}
+
+/**
+ * Sets the Telegram webhook to this script's URL.
+ */
+function _setWebhook() {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('BOT_TOKEN');
+  const url = props.getProperty('WEB_APP_URL');
+    if (!token || !url || token.includes('YOUR_BOT')) {
+      throw new Error("BOT_TOKEN и/или WEB_APP_URL не установлены в Свойствах скрипта (Script Properties). Запустите initialSetup из меню или настройте их вручную.");
+  }
+  const response = UrlFetchApp.fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${url}&drop_pending_updates=true`);
+  Logger.log('✅ (Шаг 2/3) Вебхук установлен: ' + response.getContentText());
+}
+
+/**
+ * Creates a time-based trigger for the message cleaner function.
+ */
+function _createTrigger() {
+  ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t)); // Prevent duplicate triggers
+  ScriptApp.newTrigger('messageCleaner').timeBased().everyMinutes(1).create();
+  Logger.log('✅ (Шаг 3/3) Триггер очистки создан.');
+}
+
+// =================================================================================
+// =========================  D. CORE LOGIC & EVENT HANDLERS =====================
+// =================================================================================
+
+/**
+ * Main entry point for all Telegram updates.
  */
 function doPost(e) {
-    try {
-        if (e && e.postData && e.postData.contents) {
-            const update = JSON.parse(e.postData.contents);
-            handleUpdate(update);
-        }
-    } catch (error) {
-        Logger.log(`doPost Error: ${error.message} \nStack: ${error.stack}`);
+  try {
+    if (e && e.postData && e.postData.contents) {
+      handleUpdate(JSON.parse(e.postData.contents));
     }
-    return ContentService.createTextOutput("OK");
+  } catch (error) {
+    logToSheet("CRITICAL", `Критическая ошибка в doPost: ${error.message}`);
+  }
+  return ContentService.createTextOutput("OK");
 }
 
 /**
- * The main update handler/dispatcher.
+ * Central hub for processing all incoming updates.
  */
 function handleUpdate(update) {
-    const services = {
-        ss: SpreadsheetApp.getActiveSpreadsheet(),
-        cache: CacheService.getScriptCache(),
-        lock: LockService.getScriptLock(),
-        properties: PropertiesService.getScriptProperties(),
-        fetch: UrlFetchApp
-    };
+    const config = getCachedConfig();
+    if (!config.bot_enabled) return; // Task #3: Check if bot is enabled
 
+    const chat = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat;
+    if (!chat) return;
+
+    // Task #5: Check if the chat is authorized
+    if (config.authorized_chat_ids.length > 0 && !config.authorized_chat_ids.includes(String(chat.id))) {
+        return;
+    }
+    
+    const services = { ss: SpreadsheetApp.getActiveSpreadsheet(), cache: CacheService.getScriptCache(), lock: LockService.getScriptLock() };
+
+    // Task #7 & #4: Handle channel posts and whitelisted users
+    if (update.message && update.message.sender_chat) {
+        const senderId = String(update.message.sender_chat.id);
+        if (senderId === String(config.target_channel_id) || config.whitelist_ids.includes(senderId)) {
+            return; // Ignore posts from target channel or whitelisted channels
+        }
+    }
+
+    const user = update.message?.from || update.callback_query?.from || update.chat_member?.new_chat_member?.user;
+    if (!user) return;
+    if (user.is_bot || IGNORED_USER_IDS.includes(String(user.id)) || config.whitelist_ids.includes(String(user.id))) {
+        return; // Ignore bots, system users, and whitelisted users
+    }
+
+    // --- Event Dispatcher ---
     if (update.chat_member) {
-        handleNewChatMember(update.chat_member, services);
+        handleNewChatMember(update.chat_member, services, config); // Task #1: Handle new members correctly
     } else if (update.message) {
-        handleMessage(update.message, services);
+        handleMessage(update.message, services, config);
     } else if (update.callback_query) {
-        handleCallbackQuery(update.callback_query, services);
-    }
-}
-
-
-// =================================================================================
-// 2. CORE LOGIC - HANDLING USER ACTIONS
-// =================================================================================
-
-/**
- * Handles a new user joining or leaving the chat.
- */
-function handleNewChatMember(chatMember, services) {
-    const newUser = chatMember.new_chat_member;
-    const chat = chatMember.chat;
-
-    if (newUser.status !== 'member') return;
-
-    const config = getCachedConfig(services);
-    const muteUntil = new Date().getTime() / 1000 + config.captcha_mute_duration_min * 60;
-    restrictUser(chat.id, newUser.id, false, muteUntil, services);
-
-    const text = config.texts.captcha_text.replace('{user_mention}', getMention(newUser));
-    const keyboard = {
-        inline_keyboard: [
-            [{
-                text: "✅ Я не робот",
-                callback_data: `captcha_${newUser.id}`
-            }]
-        ]
-    };
-    const sentMessage = sendTelegram('sendMessage', {
-        chat_id: chat.id,
-        text: text,
-        parse_mode: 'HTML',
-        reply_markup: JSON.stringify(keyboard)
-    }, services);
-
-    if (sentMessage && sentMessage.ok) {
-        const messageId = sentMessage.result.message_id;
-        const captchaData = {
-            userId: newUser.id,
-            chatId: chat.id,
-            messageId: messageId,
-            status: 'pending'
-        };
-        services.cache.put(`captcha_${newUser.id}`, JSON.stringify(captchaData), config.captcha_message_timeout_sec);
-        addMessageToCleaner(chat.id, messageId, config.captcha_message_timeout_sec, services);
+        handleCallbackQuery(update.callback_query, services, config);
     }
 }
 
 /**
- * Handles incoming callback queries from inline buttons.
+ * Task #1: Handles a new user joining the chat, spam-free.
  */
-function handleCallbackQuery(callbackQuery, services) {
+function handleNewChatMember(chatMember, services, config) {
+    // This is the crucial check: only trigger on a real user join.
+    const isRealJoin = (chatMember.old_chat_member.status === 'left' || chatMember.old_chat_member.status === 'kicked') 
+                     && chatMember.new_chat_member.status === 'member';
+    if (!isRealJoin) return;
+
+    const user = chatMember.new_chat_member.user;
+    if (isAdmin(chatMember.chat.id, user.id, services.cache)) return; // Admins don't need CAPTCHA
+
+    const muteUntil = Math.floor(new Date().getTime() / 1000 + config.captcha_mute_duration_min * 60);
+    restrictUser(chatMember.chat.id, user.id, false, muteUntil);
+
+    const text = config.texts.captcha_text.replace('{user_mention}', getMention(user));
+    const keyboard = { inline_keyboard: [[{ text: "✅ Я не робот", callback_data: `captcha_${user.id}` }]] };
+    const sentMessage = sendTelegram('sendMessage', { chat_id: chatMember.chat.id, text: text, parse_mode: 'HTML', reply_markup: JSON.stringify(keyboard) });
+
+    if (sentMessage?.ok) {
+        addMessageToCleaner(chatMember.chat.id, sentMessage.result.message_id, config.captcha_message_timeout_sec, services);
+    }
+}
+
+/**
+ * Handles callback queries from CAPTCHA buttons.
+ */
+function handleCallbackQuery(callbackQuery, services, config) {
     const data = callbackQuery.data;
     const user = callbackQuery.from;
     const chat = callbackQuery.message.chat;
     const messageId = callbackQuery.message.message_id;
+    if (!data.startsWith('captcha_')) return;
 
-    if (data.startsWith('captcha_')) {
-        const expectedUserId = data.split('_')[1];
+    const expectedUserId = data.split('_')[1];
+    if (String(user.id) !== expectedUserId) {
+        sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Эта кнопка не для вас!', show_alert: true });
+        return;
+    }
+    
+    unmuteUser(chat.id, user.id);
+    deleteMessage(chat.id, messageId);
+    sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '✅ Проверка пройдена!' });
 
-        if (String(user.id) !== expectedUserId) {
-            sendTelegram('answerCallbackQuery', {
-                callback_query_id: callbackQuery.id,
-                text: 'Эта кнопка не для вас!',
-                show_alert: true
-            }, services);
-            return;
-        }
-
-        const captchaDataStr = services.cache.get(`captcha_${user.id}`);
-
-        if (captchaDataStr) {
-            const captchaData = JSON.parse(captchaDataStr);
-            captchaData.status = 'passed';
-            services.cache.put(`captcha_${user.id}`, JSON.stringify(captchaData), 21600); // Keep for 6 hours
-
-            unmuteUser(chat.id, user.id, services);
-            deleteMessage(chat.id, messageId, services);
-            sendTelegram('answerCallbackQuery', {
-                callback_query_id: callbackQuery.id,
-                text: '✅ Проверка пройдена!',
-                show_alert: false
-            }, services);
-
-            const successMsg = sendTelegram('sendMessage', {
-                chat_id: chat.id,
-                text: `${getMention(user)}, добро пожаловать! Теперь вы можете отправлять сообщения.`
-            }, services);
-            if (successMsg.ok) {
-                addMessageToCleaner(chat.id, successMsg.result.message_id, 10, services);
-            }
-
-        } else {
-            sendTelegram('answerCallbackQuery', {
-                callback_query_id: callbackQuery.id,
-                text: '⏳ Время вышло. Попробуйте войти в чат заново.',
-                show_alert: true
-            }, services);
-        }
+    const welcomeMsg = `${getMention(user)}, добро пожаловать!`;
+    const successMsg = sendTelegram('sendMessage', { chat_id: chat.id, text: welcomeMsg, parse_mode: 'HTML' });
+    if (successMsg?.ok) {
+        addMessageToCleaner(chat.id, successMsg.result.message_id, 15, services);
     }
 }
 
 /**
- * Handles incoming messages from users.
+ * Handles regular messages to check for subscription status.
  */
-function handleMessage(message, services) {
+function handleMessage(message, services, config) {
     const user = message.from;
     const chat = message.chat;
-    const config = getCachedConfig(services);
+    if (String(chat.id) === String(user.id)) return; // Ignore private messages to bot
 
-    if (user.is_bot || String(chat.id) === String(user.id)) return;
+    if (isAdmin(chat.id, user.id, services.cache)) return;
+    
+    const isMember = isUserSubscribed(user.id, config.target_channel_id);
+    if (isMember) {
+        services.cache.remove(`violations_${user.id}`);
+        return;
+    }
 
-    const isMember = isUserSubscribed(user.id, config.target_channel_id, services);
+    // If not a member, delete message and handle violation
+    deleteMessage(chat.id, message.message_id);
+    let violationCount = Number(services.cache.get(`violations_${user.id}`) || 0) + 1;
+    services.cache.put(`violations_${user.id}`, violationCount, 21600); // Cache violations for 6 hours
 
-    if (!isMember) {
-        deleteMessage(chat.id, message.message_id, services);
-
-        let violationCount = Number(services.cache.get(`violations_${user.id}`) || 0);
-        violationCount++;
-
-        if (violationCount < config.violation_limit) {
-            if (violationCount === 1) {
-                const text = config.texts.sub_warning_text.replace('{user_mention}', getMention(user));
-                const sentWarning = sendTelegram('sendMessage', {
-                    chat_id: chat.id,
-                    text: text,
-                    parse_mode: 'HTML'
-                }, services);
-                if (sentWarning.ok) {
-                    addMessageToCleaner(chat.id, sentWarning.result.message_id, config.warning_message_timeout_sec, services);
-                }
+    if (violationCount < config.violation_limit) {
+        if (violationCount === 1) { // Send warning only on the first violation
+            const text = config.texts.sub_warning_text.replace('{user_mention}', getMention(user));
+            const sentWarning = sendTelegram('sendMessage', { chat_id: chat.id, text: text, parse_mode: 'HTML' });
+            if (sentWarning?.ok) {
+                addMessageToCleaner(chat.id, sentWarning.result.message_id, config.warning_message_timeout_sec, services);
             }
-            services.cache.put(`violations_${user.id}`, violationCount, 3600);
-        } else {
-            applyProgressiveMute(chat.id, user.id, services);
-            services.cache.remove(`violations_${user.id}`);
         }
     } else {
-        services.cache.remove(`violations_${user.id}`);
+        applyProgressiveMute(chat.id, user, services, config);
+        services.cache.remove(`violations_${user.id}`); // Reset counter after muting
     }
 }
 
 // =================================================================================
-// 3. HELPER & UTILITY FUNCTIONS
+// =========================  E. UTILITY & HELPER FUNCTIONS =======================
 // =================================================================================
 
-function isUserSubscribed(userId, channelId, services) {
-    if (!channelId) return true; // If no channel is set, always return true.
+/**
+ * Task #2: Gets configuration, falling back to defaults and caching the result.
+ */
+function getCachedConfig() {
+    const cache = CacheService.getScriptCache();
+    const cached = cache.get('config');
+    if (cached) { try { return JSON.parse(cached); } catch(e) { /* continue to load */ } }
+
+    let config = JSON.parse(JSON.stringify(DEFAULT_CONFIG)); // Start with defaults
     try {
-        const response = sendTelegram('getChatMember', {
-            chat_id: channelId,
-            user_id: userId
-        }, services);
-        if (!response || !response.ok) return false;
-        const status = response.result.status;
-        return ['creator', 'administrator', 'member'].indexOf(status) !== -1;
+        const ss = SpreadsheetApp.getActiveSpreadsheet();
+        const configSheet = ss.getSheetByName('Config');
+        const textsSheet = ss.getSheetByName('Texts');
+        const whitelistSheet = ss.getSheetByName('Whitelist');
+        
+        if (configSheet) {
+          configSheet.getDataRange().getValues().slice(1).forEach(row => {
+              if (row[0]) {
+                  const key = row[0];
+                  const value = row[1];
+                  if (typeof config[key] === 'boolean') { 
+                      config[key] = (String(value).toLowerCase() === 'true');
+                  } else if (typeof config[key] === 'number') {
+                      config[key] = isNaN(Number(value)) || value === '' ? config[key] : Number(value);
+                  } else {
+                      config[key] = value;
+                  }
+              }
+          });
+        }
+
+        // BUG FIX: Only overwrite default texts if the Texts sheet has actual content.
+        if (textsSheet) {
+            const textData = textsSheet.getDataRange().getValues().slice(1).filter(row => row[0] && row[1]); // Filter rows with key and value
+            if (textData.length > 0) {
+                config.texts = {}; // Overwrite only if new data exists
+                textData.forEach(row => {
+                    config.texts[row[0]] = row[1];
+                });
+            }
+        }
+        
+        config.authorized_chat_ids = String(config.authorized_chat_ids || '').split(/\n|,|\s+/).filter(Boolean);
+        config.whitelist_ids = whitelistSheet ? whitelistSheet.getDataRange().getValues().slice(1).map(row => String(row[0])).filter(Boolean) : [];
+
+        cache.put('config', JSON.stringify(config), 300); // Cache for 5 minutes
     } catch (e) {
-        return false;
+        logToSheet("ERROR", `Failed to load config from sheet: ${e.message}. Using defaults.`);
+    }
+    return config;
+}
+
+function isAdmin(chatId, userId, cache) {
+    const cacheKey = `admin_cache_${chatId}`;
+    let adminList = JSON.parse(cache.get(cacheKey) || '[]');
+    if (adminList.includes(userId)) return true;
+
+    const response = sendTelegram('getChatAdministrators', { chat_id: chatId });
+    if (response && response.ok) {
+        adminList = response.result.map(admin => admin.user.id);
+        cache.put(cacheKey, JSON.stringify(adminList), 3600); // Cache admin list for 1 hour
+        return adminList.includes(userId);
+    }
+    return false; // Fail safely
+}
+
+function isUserSubscribed(userId, channelId) {
+    if (!channelId || String(channelId).trim() === '') return true; // If no channel is set, subscription check is waived.
+    try {
+        const response = sendTelegram('getChatMember', { chat_id: channelId, user_id: userId });
+        const status = response?.result?.status;
+        return ['creator', 'administrator', 'member'].includes(status);
+    } catch (e) {
+        logToSheet("ERROR", `Ошибка проверки подписки для user ${userId} в канале ${channelId}: ${e.message}`);
+        return false; // Fail safely
     }
 }
 
-function applyProgressiveMute(chatId, userId, services) {
-    const lock = services.lock;
-    lock.waitLock(15000);
-
+function applyProgressiveMute(chatId, user, services, config) {
+    const lock = services.lock; lock.waitLock(15000);
     try {
-        const config = getCachedConfig(services);
-        const usersSheet = services.ss.getSheetByName('Users');
+        const usersSheet = services.ss.getSheetByName('Users'); if (!usersSheet) return;
+        const userId = user.id;
         const userData = findRow(usersSheet, userId, 1);
-
-        let currentLevel = userData ? userData.row[1] : 0;
-        const newLevel = currentLevel + 1;
+        const newLevel = (userData ? Number(userData.row[1]) : 0) + 1;
 
         let muteDurationMin;
-        switch (newLevel) {
-            case 1:
-                muteDurationMin = config.mute_level_1_duration_min;
-                break;
-            case 2:
-                muteDurationMin = config.mute_level_2_duration_min;
-                break;
-            default:
-                muteDurationMin = config.mute_level_3_duration_min;
-                break;
+        if (newLevel === 1) muteDurationMin = config.mute_level_1_duration_min;
+        else if (newLevel === 2) muteDurationMin = config.mute_level_2_duration_min;
+        else muteDurationMin = config.mute_level_3_duration_min;
+
+        const muteUntil = Math.floor(new Date().getTime() / 1000 + muteDurationMin * 60);
+        restrictUser(chatId, userId, false, muteUntil);
+
+        if (userData) { usersSheet.getRange(userData.rowIndex, 2).setValue(newLevel); } 
+        else { usersSheet.appendRow([userId, newLevel, new Date()]); }
+
+        const text = config.texts.sub_mute_text.replace('{user_mention}', getMention(user)).replace('{duration}', muteDurationMin);
+        const sentMuteMsg = sendTelegram('sendMessage', { chat_id: chatId, text: text, parse_mode: 'HTML' });
+        if (sentMuteMsg?.ok) {
+            addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 45, services);
         }
+    } finally { lock.releaseLock(); }
+}
 
-        const muteUntil = new Date().getTime() / 1000 + muteDurationMin * 60;
-        restrictUser(chatId, userId, false, muteUntil, services);
+function addMessageToCleaner(chatId, messageId, delaySec, services) {
+    const lock = services.lock; lock.waitLock(10000);
+    try {
+        const props = PropertiesService.getScriptProperties();
+        const queue = JSON.parse(props.getProperty('deleteQueue') || '[]');
+        const deleteAt = new Date().getTime() + delaySec * 1000;
+        queue.push({ chatId, messageId, deleteAt });
+        props.setProperty('deleteQueue', JSON.stringify(queue));
+    } finally { lock.releaseLock(); }
+}
 
-        if (userData) {
-            usersSheet.getRange(userData.rowIndex, 2).setValue(newLevel);
-        } else {
-            usersSheet.appendRow([userId, newLevel]);
+function messageCleaner() {
+    const lock = LockService.getScriptLock(); lock.waitLock(20000);
+    try {
+        const props = PropertiesService.getScriptProperties();
+        const queueStr = props.getProperty('deleteQueue');
+        if (!queueStr) return;
+        
+        const now = new Date().getTime();
+        let queue = JSON.parse(queueStr);
+        
+        const remainingItems = queue.filter(item => now < item.deleteAt);
+        const itemsToDelete = queue.filter(item => now >= item.deleteAt);
+
+        if (itemsToDelete.length > 0) {
+            props.setProperty('deleteQueue', JSON.stringify(remainingItems));
+            itemsToDelete.forEach(item => deleteMessage(item.chatId, item.messageId));
         }
-
-        const user = {
-            id: userId,
-            first_name: 'Пользователь'
-        };
-        let text = config.texts.sub_mute_text
-            .replace('{user_mention}', getMention(user))
-            .replace('{duration}', muteDurationMin);
-        const sentMuteMsg = sendTelegram('sendMessage', {
-            chat_id: chatId,
-            text: text,
-            parse_mode: 'HTML'
-        }, services);
-        if (sentMuteMsg.ok) {
-            addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 30, services);
-        }
-
-    } finally {
-        lock.releaseLock();
-    }
+    } catch (e) {
+        logToSheet("ERROR", `messageCleaner Error: ${e.message}`);
+        if (e instanceof SyntaxError) { PropertiesService.getScriptProperties().deleteProperty('deleteQueue'); }
+    } finally { lock.releaseLock(); }
 }
 
 function getMention(user) {
-    const name = user.first_name || 'Пользователь';
-    return `<a href="tg://user?id=${user.id}">${name.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>`;
+    const name = (user.first_name || 'User').replace(/[<>]/g, '');
+    return `<a href="tg://user?id=${user.id}">${name}</a>`;
 }
 
 function findRow(sheet, value, column) {
     if (!sheet) return null;
     const data = sheet.getDataRange().getValues();
-    for (let i = 0; i < data.length; i++) {
-        if (data[i][column - 1] == value) {
-            return {
-                row: data[i],
-                rowIndex: i + 1
-            };
+    for (let i = data.length - 1; i > 0; i--) {
+        if (String(data[i][column - 1]) === String(value)) {
+            return { row: data[i], rowIndex: i + 1 };
         }
     }
     return null;
 }
 
 // =================================================================================
-// 4. GARBAGE COLLECTOR - FOR DELETING MESSAGES
+// =========================  F. TELEGRAM API & LOGGING  =========================
 // =================================================================================
 
-function main() {
-  messageCleaner();
-}
-
-
-function addMessageToCleaner(chatId, messageId, delaySec, services) {
-    const lock = services.lock;
-    lock.waitLock(10000);
+function sendTelegram(method, payload) {
+    const token = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
+    if (!token) return { ok: false, description: "Token not configured." };
     try {
-        const properties = services.properties;
-        const queueStr = properties.getProperty('deleteQueue') || '[]';
-        const queue = JSON.parse(queueStr);
-
-        const deleteAt = new Date().getTime() + delaySec * 1000;
-        queue.push({
-            chatId,
-            messageId,
-            deleteAt
+        const response = UrlFetchApp.fetch(`https://api.telegram.org/bot${token}/${method}`, {
+            method: 'post', contentType: 'application/json',
+            payload: JSON.stringify(payload), muteHttpExceptions: true
         });
-
-        properties.setProperty('deleteQueue', JSON.stringify(queue));
-    } finally {
-        lock.releaseLock();
-    }
-}
-
-function messageCleaner(providedServices) {
-    const services = providedServices || {
-        ss: SpreadsheetApp.getActiveSpreadsheet(),
-        cache: CacheService.getScriptCache(),
-        lock: LockService.getScriptLock(),
-        properties: PropertiesService.getScriptProperties(),
-        fetch: UrlFetchApp
-    };
-    
-    const lock = services.lock;
-    lock.waitLock(20000); 
-
-    let queue;
-    const properties = services.properties;
-
-    try {
-        const queueStr = properties.getProperty('deleteQueue');
-        if (!queueStr) return;
-
-        queue = JSON.parse(queueStr);
-        const now = new Date().getTime();
-        const stillPending = [];
-        const config = getCachedConfig(services);
-
-        for (const item of queue) {
-            if (now >= item.deleteAt) {
-                deleteMessage(item.chatId, item.messageId, services);
-            } else {
-                stillPending.push(item);
-            }
+        const json = JSON.parse(response.getContentText());
+        if (!json.ok) {
+            logToSheet("WARN", `TG API Error (${method}): ${response.getContentText()}`);
         }
-        properties.setProperty('deleteQueue', JSON.stringify(stillPending));
-
+        return json;
     } catch (e) {
-        Logger.log(`Cleaner Error: ${e.message}`);
-        if (e instanceof SyntaxError) {
-            properties.deleteProperty('deleteQueue');
-        }
-    } finally {
-        lock.releaseLock();
+        logToSheet("ERROR", `API Call Failed: ${method}, ${e.message}`);
+        return { ok: false, description: e.message };
     }
 }
 
-
-// =================================================================================
-// 5. TELEGRAM API WRAPPERS
-// =================================================================================
-
-function sendTelegram(method, payload, services) {
-    try {
-        const fetchApp = services ? services.fetch : UrlFetchApp;
-        const options = {
-            'method': 'post',
-            'contentType': 'application/json',
-            'payload': JSON.stringify(payload),
-            'muteHttpExceptions': true
-        };
-        const response = fetchApp.fetch(`${TELEGRAM_API_URL}/${method}`, options);
-        return JSON.parse(response.getContentText());
-    } catch (e) {
-        Logger.log(`API Call Failed: ${method}, Payload: ${JSON.stringify(payload)}, Error: ${e.message}`);
-        return {
-            ok: false,
-            description: e.message
-        };
-    }
+function deleteMessage(chatId, messageId) {
+    return sendTelegram('deleteMessage', { chat_id: chatId, message_id: messageId });
 }
 
-function deleteMessage(chatId, messageId, services) {
-    return sendTelegram('deleteMessage', {
-        chat_id: chatId,
-        message_id: messageId
-    }, services);
-}
-
-function restrictUser(chatId, userId, canSendMessages, untilDate, services) {
-    const permissions = {
-        can_send_messages: canSendMessages
-    };
-    if (canSendMessages) {
-        permissions.can_send_media_messages = true;
-        permissions.can_send_polls = true;
-        permissions.can_send_other_messages = true;
-        permissions.can_add_web_page_previews = true;
-        permissions.can_invite_users = true;
-    }
+function restrictUser(chatId, userId, canSendMessages, untilDate) {
+    const permissions = { 'can_send_messages': canSendMessages, 'can_send_media_messages': canSendMessages };
     return sendTelegram('restrictChatMember', {
-        chat_id: chatId,
-        user_id: userId,
-        permissions: JSON.stringify(permissions),
-        until_date: untilDate || 0
-    }, services);
+        chat_id: chatId, user_id: userId, permissions: JSON.stringify(permissions), until_date: untilDate || 0
+    });
 }
 
-function unmuteUser(chatId, userId, services) {
-    return restrictUser(chatId, userId, true, 0, services);
+function unmuteUser(chatId, userId) {
+    const permissions = { 'can_send_messages': true, 'can_send_media_messages': true, 'can_send_other_messages': true, 'can_add_web_page_previews': true };
+    return sendTelegram('restrictChatMember', { chat_id: chatId, user_id: userId, permissions: JSON.stringify(permissions) });
 }
 
-
-// =================================================================================
-// 6. CACHING AND DATA MANAGEMENT
-// =================================================================================
-function getCachedConfig(services) {
-    const cache = services.cache;
-    const cachedConfig = cache.get('config');
-    if (cachedConfig) {
-        return JSON.parse(cachedConfig);
+function logToSheet(level, message) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Logs');
+    if (sheet) {
+        if (sheet.getLastRow() > 5000) { sheet.deleteRows(2, sheet.getLastRow() - 4999); }
+        sheet.appendRow([new Date(), level, String(message).slice(0, 50000)]);
     }
-
-    const ss = services.ss;
-    const configSheet = ss.getSheetByName('Config');
-    const textsSheet = ss.getSheetByName('Texts');
-
-    const configData = configSheet.getDataRange().getValues();
-    const textsData = textsSheet.getDataRange().getValues();
-
-    const config = {};
-    configData.slice(1).forEach(row => {
-        if (row[0]) config[row[0]] = isNaN(row[1]) ? row[1] : Number(row[1]);
-    });
-
-    config.texts = {};
-    textsData.slice(1).forEach(row => {
-        if (row[0]) config.texts[row[0]] = row[1];
-    });
-
-    cache.put('config', JSON.stringify(config), 300); // Cache for 5 minutes
-    return config;
-}
-
-// =================================================================================
-// 7. WEBHOOK UTILITIES (Run these manually from the editor)
-// =================================================================================
-
-/**
- * Sets the webhook to this script's URL. Run this once after deploying.
- */
-function _setWebhook() {
-  if (BOT_TOKEN === 'YOUR_BOT_TOKEN' || WEB_APP_URL === 'YOUR_WEB_APP_URL') {
-    Logger.log('ERROR: Please fill in BOT_TOKEN and WEB_APP_URL at the top of the Code.gs file.');
-    return;
-  }
-  const response = UrlFetchApp.fetch(`${TELEGRAM_API_URL}/setWebhook?url=${WEB_APP_URL}`);
-  Logger.log(response.getContentText());
-}
-
-/**
- * Gets information about the current webhook. Useful for debugging.
- */
-function _getWebhookInfo() {
-  const response = UrlFetchApp.fetch(`${TELEGRAM_API_URL}/getWebhookInfo`);
-  Logger.log(response.getContentText());
-}
-
-/**
- * Deletes the current webhook.
- */
-function _deleteWebhook() {
-  const response = UrlFetchApp.fetch(`${TELEGRAM_API_URL}/deleteWebhook`);
-  Logger.log(response.getContentText());
-}
-
-/**
- * Creates the time-based trigger for the message cleaner.
- */
-function _createTrigger() {
-  // Delete existing triggers to avoid duplicates
-  ScriptApp.getProjectTriggers().forEach(trigger => ScriptApp.deleteTrigger(trigger));
-  
-  // Create a new trigger
-  ScriptApp.newTrigger('main')
-    .timeBased()
-    .everyMinutes(1)
-    .create();
-  Logger.log('✅ Time-based trigger for main (messageCleaner) created.');
+  } catch (e) { /* Failsafe, do nothing */ }
 }
