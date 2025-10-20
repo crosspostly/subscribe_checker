@@ -168,7 +168,7 @@ function test_handleNewChatMember_CAPTCHA() {
 
     const chatMember = {
         chat: { id: TEST_CHAT_ID, title: "Test Chat" },
-        new_chat_member: { id: TEST_USER_ID, first_name: "Test", is_bot": false, status: "member" }
+        new_chat_member: { id: TEST_USER_ID, first_name: "Test", is_bot: false, status: "member" }
     };
     
     handleNewChatMember(chatMember, services);
