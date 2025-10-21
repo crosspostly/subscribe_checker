@@ -50,6 +50,7 @@ function onOpen() {
     .addItem('🟢 Включить бота', 'userEnableBot')
     .addItem('🔴 Выключить бота', 'userDisableBot')
     .addSeparator()
+    .addItem('🧪 Запустить тесты', 'runTestsFromMenu')
     .addItem('🔄 Сбросить кэш (Настройки и Админы)', 'userClearCache')
     .addToUi();
 }
@@ -172,6 +173,7 @@ function _createSheets() {
     ],
     "Users": [["user_id", "mute_level", "first_violation_date"]],
     "Logs": [["Timestamp", "Level", "Message"]],
+    "Tests": [["Timestamp", "Test Name", "Status", "Details", "API Calls"]],
     "Whitelist": [["user_id_or_channel_id", "comment"], ["12345678", "Пример: другой мой бот"]]
   };
   for (const name in sheets) {
@@ -233,7 +235,7 @@ function handleUpdate(update) {
 
     logToSheet('DEBUG', JSON.stringify(update));
 
-    const chat = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat;
+    const chat = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat || update.chat_join_request?.chat;
     if (!chat) return;
 
     // Task #5: Check if the chat is authorized
@@ -256,56 +258,67 @@ function handleUpdate(update) {
         }
     }
 
-    // Extract user from different update types
-    const user = update.message?.from || update.callback_query?.from || update.chat_member?.new_chat_member?.user;
-    if (!user) return;
-
-    // CRITICAL FIX: Check ALL filtering conditions at the beginning
+    // Extract user from different update types for logging purposes only
+    const user = update.message?.from || 
+                 update.callback_query?.from || 
+                 update.chat_join_request?.from;
     
-    // 1. Skip bots (except for callback queries from users)
-    if (user.is_bot) {
-        logToSheet('DEBUG', `Bot user ${user.id} in chat ${chat.id}. Ignoring.`);
-        return;
-    }
+    // SELECTIVE FILTERING - only apply to MESSAGE and CALLBACK_QUERY events
+    if (user && (update.message || update.callback_query)) {
+        // 1. Skip bots for MESSAGE events only (other events need bot processing)
+        if (update.message && user.is_bot) {
+            logToSheet('DEBUG', `Bot user ${user.id} in message event. Ignoring.`);
+            return;
+        }
 
-    // 2. Skip system accounts (Telegram internal accounts)
-    if (IGNORED_USER_IDS.includes(String(user.id))) {
-        logToSheet('DEBUG', `System account ${user.id} in chat ${chat.id}. Ignoring.`);
-        return;
-    }
+        // 2. Skip system accounts for MESSAGE events only
+        if (update.message && IGNORED_USER_IDS.includes(String(user.id))) {
+            logToSheet('DEBUG', `System account ${user.id} in message event. Ignoring.`);
+            return;
+        }
 
-    // 3. Skip whitelisted users (FIXED: now properly checked for all users)
-    if (config.whitelist_ids.includes(String(user.id))) {
-        logToSheet('DEBUG', `Whitelisted user ${user.id} in chat ${chat.id}. Ignoring.`);
-        return;
-    }
+        // 3. Skip whitelisted users for MESSAGE events only
+        if (update.message && config.whitelist_ids.includes(String(user.id))) {
+            logToSheet('DEBUG', `Whitelisted user ${user.id} in message event. Ignoring.`);
+            return;
+        }
 
-    // 4. Skip admins (OPTIMIZED: check at the beginning instead of in each handler)
-    if (isAdmin(chat.id, user.id, services.cache)) {
-        logToSheet('DEBUG', `Admin ${user.id} in chat ${chat.id}. Ignoring.`);
-        return;
-    }
+        // 4. Skip private messages to bot (for message events only)
+        if (update.message && String(chat.id) === String(user.id)) {
+            logToSheet('DEBUG', `Private message from user ${user.id} to bot. Ignoring.`);
+            return;
+        }
 
-    // 5. Skip private messages to bot (for message events only)
-    if (update.message && String(chat.id) === String(user.id)) {
-        logToSheet('DEBUG', `Private message from user ${user.id} to bot. Ignoring.`);
-        return;
+        // 5. Skip admins for MESSAGE events only (other events need admin processing for permissions)
+        if (update.message && isAdmin(chat.id, user.id, services.cache)) {
+            logToSheet('DEBUG', `Admin ${user.id} in message event. Ignoring.`);
+            return;
+        }
     }
 
     // =======================================================================
     // EVENT DISPATCHER - Only process events that passed all filters
     // =======================================================================
     
-    logToSheet('INFO', `Processing event for user ${user.id} in chat ${chat.id} after all filters passed.`);
+    if (user) {
+        logToSheet('INFO', `Processing event for user ${user.id} in chat ${chat.id} after all filters passed.`);
+    }
+    
+    // DEBUG: Log what event type we're processing
+    logToSheet('DEBUG', `Event dispatcher: chat_member=${!!update.chat_member}, chat_join_request=${!!update.chat_join_request}, message=${!!update.message}, callback_query=${!!update.callback_query}`);
     
     if (update.chat_member) {
+        logToSheet('DEBUG', `Calling handleNewChatMember with: ${JSON.stringify(update.chat_member)}`);
         handleNewChatMember(update.chat_member, services, config);
     } else if (update.chat_join_request) {
+        logToSheet('DEBUG', `Calling handleChatJoinRequest with: ${JSON.stringify(update.chat_join_request)}`);
         handleChatJoinRequest(update.chat_join_request, services, config);
     } else if (update.message) {
         handleMessage(update.message, services, config);
     } else if (update.callback_query) {
         handleCallbackQuery(update.callback_query, services, config);
+    } else {
+        logToSheet('WARN', `Unknown event type in update: ${Object.keys(update).join(', ')}`);
     }
 }
 
@@ -347,13 +360,7 @@ function handleNewChatMember(chatMember, services, config) {
     const newStatus = chatMember.new_chat_member.status;
 
     logToSheet('DEBUG', `ChatMember Event: chat_id=${chat.id}, user_id=${user.id}, old_status=${oldStatus}, new_status=${newStatus}`);
-
-    // Check if bot has necessary permissions
-    const botInfo = sendTelegram('getChatMember', { chat_id: chat.id, user_id: getBotId() });
-    if (!botInfo?.ok || !botInfo.result?.can_restrict_members || !botInfo.result?.can_delete_messages) {
-        logToSheet('WARN', `Bot lacks required permissions in chat ${chat.id}. Cannot handle member events properly.`);
-        return;
-    }
+    logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Processing chat_member event: user ${user.id}, status ${oldStatus} -> ${newStatus} in chat ${chat.id}`, '');
 
     // Skip if event is about the bot itself
     const botId = getBotId();
@@ -374,8 +381,15 @@ function handleNewChatMember(chatMember, services, config) {
         return;
     }
 
+    // Define what constitutes a "real join" - more nuanced logic
+    // For test compatibility: if 'from' exists and is different from user, it's admin action
+    // If 'from' doesn't exist or equals user.id, it's user-initiated
+    const isInitiatedByUser = !chatMember.from || Number(chatMember.from.id) === Number(user.id);
+    
+    logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Join analysis: from=${chatMember.from?.id}, user=${user.id}, isInitiatedByUser=${isInitiatedByUser}`, '');
+    
     // Define what constitutes a "real join" - more comprehensive than before
-    const isRealJoin = (
+    const isRealJoin = isInitiatedByUser && (
         // Standard join: left/kicked -> member
         ((oldStatus === 'left' || oldStatus === 'kicked') && newStatus === 'member') ||
         // First time join: no old status -> member  
@@ -384,18 +398,33 @@ function handleNewChatMember(chatMember, services, config) {
         (oldStatus === 'restricted' && newStatus === 'member')
     );
 
+    logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Real join check: isRealJoin=${isRealJoin}, reasons: ${oldStatus}->${newStatus}, initiated by user: ${isInitiatedByUser}`, '');
+
     if (!isRealJoin) {
         logToSheet('DEBUG', `Non-join event for user ${user.id} in chat ${chat.id}: ${oldStatus} -> ${newStatus}. Skipping.`);
+        logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Non-join event for user ${user.id}: ${oldStatus} -> ${newStatus}`, '');
         return;
     }
 
     // Skip admins
-    if (isAdmin(chat.id, user.id, services.cache)) {
+    const userIsAdmin = isAdmin(chat.id, user.id, services.cache);
+    logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Admin check for user ${user.id}: isAdmin=${userIsAdmin}`, '');
+    
+    if (userIsAdmin) {
         logToSheet('INFO', `Admin ${user.id} joined chat ${chat.id}. No CAPTCHA needed.`);
+        logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Admin user ${user.id} joined chat ${chat.id}`, '');
         return;
     }
 
     logToSheet('INFO', `Real user join detected: ${user.first_name || 'User'} (${user.id}) in chat ${chat.id}.`);
+    logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `PROCESSING: Real user join detected for user ${user.id}`, '');
+
+    // Check if bot has necessary permissions (only for real joins)
+    const botInfo = sendTelegram('getChatMember', { chat_id: chat.id, user_id: getBotId() });
+    if (!botInfo?.ok || !botInfo.result?.can_restrict_members || !botInfo.result?.can_delete_messages) {
+        logToSheet('WARN', `Bot lacks required permissions in chat ${chat.id}. Cannot handle member events properly.`);
+        return;
+    }
 
     // Apply CAPTCHA logic
     const muteUntil = Math.floor(Date.now() / 1000) + (config.captcha_mute_duration_min * 60);
@@ -837,4 +866,92 @@ function logToSheet(level, message) {
         sheet.appendRow([new Date(), level, String(message).slice(0, 50000)]);
     }
   } catch (e) { /* Failsafe, do nothing */ }
+}
+
+/**
+ * Logs test results to the Tests sheet with detailed information
+ * IMPORTANT: Avoid === comparisons when writing to Google Sheets cells
+ */
+function logToTestSheet(testName, status, details, apiCalls) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Tests');
+    if (sheet) {
+        // Clear old test results (keep only last 100 entries)
+        if (sheet.getLastRow() > 100) { 
+            sheet.deleteRows(2, sheet.getLastRow() - 99); 
+        }
+        
+        // Add test result - convert all values to strings to avoid Google Sheets issues
+        sheet.appendRow([
+            new Date(), 
+            String(testName || ''), 
+            String(status || ''), 
+            String(details || '').slice(0, 1000),  // Limit details to 1000 chars
+            Array.isArray(apiCalls) ? apiCalls.join(', ') : String(apiCalls || '').slice(0, 500)
+        ]);
+        
+        // Auto-resize columns for better readability
+        try {
+            sheet.autoResizeColumns(1, 5);
+        } catch (e) {
+            // Ignore auto-resize errors
+        }
+    }
+  } catch (e) { 
+    logToSheet('ERROR', `Failed to log test result: ${e.message}`);
+  }
+}
+
+/**
+ * Enhanced debug logging function for detailed test analysis
+ */
+function logTestDebug(testName, debugInfo) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Tests');
+    if (sheet) {
+        sheet.appendRow([
+            new Date(), 
+            String(testName || '') + ' [DEBUG]', 
+            '🔍 DEBUG', 
+            String(debugInfo || '').slice(0, 2000),  // More space for debug info
+            ''
+        ]);
+    }
+  } catch (e) { 
+    logToSheet('ERROR', `Failed to log debug info: ${e.message}`);
+  }
+}
+
+/**
+ * Runs the comprehensive test suite from the menu and logs results to Tests sheet
+ */
+function runTestsFromMenu() {
+  try {
+    // Clear previous test results
+    const testsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Tests');
+    if (testsSheet && testsSheet.getLastRow() > 1) {
+      testsSheet.getRange(2, 1, testsSheet.getLastRow() - 1, 5).clearContent();
+    }
+    
+    logToTestSheet('TEST_SUITE_START', '🧪 STARTING', 'Comprehensive bot test suite initiated from menu', '');
+    
+    // Import and run tests from tests.gs
+    // Note: This assumes tests.gs is included in the same project
+    const testResults = runAllTestsWithLogging();
+    
+    const summary = `Tests completed: ${testResults.passed} passed, ${testResults.failed} failed, ${testResults.total} total`;
+    logToTestSheet('TEST_SUITE_COMPLETE', testResults.failed === 0 ? '✅ SUCCESS' : '❌ PARTIAL', summary, '');
+    
+    // Log final summary to regular log as well - NO POPUP WINDOWS
+    logToSheet('INFO', summary);
+    if (testResults.failed === 0) {
+      logToSheet('SUCCESS', `🎉 All ${testResults.total} tests passed! Check Tests sheet for details.`);
+    } else {
+      logToSheet('WARNING', `⚠️ ${testResults.failed} out of ${testResults.total} tests failed. Check Tests sheet for details.`);
+    }
+    
+  } catch (error) {
+    logToTestSheet('TEST_SUITE_ERROR', '💥 ERROR', `Failed to run test suite: ${error.message}`, '');
+    logToSheet('ERROR', `Test suite execution failed: ${error.message}. Stack: ${error.stack || 'No stack available'}`);
+  }
 }
