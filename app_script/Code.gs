@@ -5,7 +5,7 @@
  */
 
 // =================================================================================
-// ===================  A. SCRIPT-WIDE DEFAULTS & CONSTANTS  =====================
+// ===================  A. SCRIPT-WIDE DEFAULTS & CONSTANTS  ====================_
 // =================================================================================
 
 /**
@@ -35,7 +35,7 @@ const DEFAULT_CONFIG = {
 const IGNORED_USER_IDS = ['136817688', '777000'];
 
 // =================================================================================
-// =================  B. SPREADSHEET UI & MANUAL CONTROLS  =====================
+// =================  B. SPREADSHEET UI & MANUAL CONTROLS  ====================_
 // =================================================================================
 
 /**
@@ -148,10 +148,28 @@ function initialSetup() {
 function _createSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheets = {
-    "Config": [ ["key", "value", "description"], ["bot_enabled", true, "TRUE/FALSE. Управляется через меню."], ["target_channel_id", "-100...", "ЧИСЛОВОЙ ID канала для проверки подписки."], ["authorized_chat_ids", "-100...\n-100...", "ID чатов, где работает бот (каждый с новой строки)"], ["admin_id", "", "Ваш Telegram ID для получения критических ошибок."] ],
-    "Texts": [ ["key", "value"], ["captcha_text", DEFAULT_CONFIG.texts.captcha_text], ["sub_warning_text", DEFAULT_CONFIG.texts.sub_warning_text], ["sub_mute_text", DEFAULT_CONFIG.texts.sub_mute_text] ],
-    "Users": [["user_id", "mute_level", "first_violation_date"]], 
-    "Logs": [["Timestamp", "Level", "Message"]], 
+    "Config": [
+        ["key", "value", "description"],
+        ["bot_enabled", true, "TRUE/FALSE. Управляется через меню."],
+        ["target_channel_id", "-100...", "ЧИСЛОВОЙ ID канала для проверки подписки."],
+        ["authorized_chat_ids", "-100...\n-100...", "ID чатов, где работает бот (каждый с новой строки)"],
+        ["admin_id", "", "Ваш Telegram ID для получения критических ошибок."],
+        ["captcha_mute_duration_min", 5, "На сколько минут блокировать новичка до прохождения капчи."],
+        ["captcha_message_timeout_sec", 300, "Через сколько секунд удалять сообщение с капчей."],
+        ["warning_message_timeout_sec", 30, "Через сколько секунд удалять предупреждение о подписке."],
+        ["violation_limit", 3, "Сколько сообщений может написать пользователь без подписки перед мутом."],
+        ["mute_level_1_duration_min", 60, "Длительность мута за первое нарушение."],
+        ["mute_level_2_duration_min", 1440, "Длительность мута за второе нарушение (24 часа)."],
+        ["mute_level_3_duration_min", 10080, "Длительность мута за третье и последующие нарушения (7 дней)."]
+    ],
+    "Texts": [
+        ["key", "value"],
+        ["captcha_text", DEFAULT_CONFIG.texts.captcha_text],
+        ["sub_warning_text", DEFAULT_CONFIG.texts.sub_warning_text],
+        ["sub_mute_text", DEFAULT_CONFIG.texts.sub_mute_text]
+    ],
+    "Users": [["user_id", "mute_level", "first_violation_date"]],
+    "Logs": [["Timestamp", "Level", "Message"]],
     "Whitelist": [["user_id_or_channel_id", "comment"], ["12345678", "Пример: другой мой бот"]]
   };
   for (const name in sheets) {
@@ -211,6 +229,8 @@ function handleUpdate(update) {
     const config = getCachedConfig();
     if (!config.bot_enabled) return; // Task #3: Check if bot is enabled
 
+    logToSheet('DEBUG', JSON.stringify(update));
+
     const chat = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat;
     if (!chat) return;
 
@@ -218,7 +238,7 @@ function handleUpdate(update) {
     if (config.authorized_chat_ids.length > 0 && !config.authorized_chat_ids.includes(String(chat.id))) {
         return;
     }
-    
+
     const services = { ss: SpreadsheetApp.getActiveSpreadsheet(), cache: CacheService.getScriptCache(), lock: LockService.getScriptLock() };
 
     // Task #7 & #4: Handle channel posts and whitelisted users
@@ -250,7 +270,7 @@ function handleUpdate(update) {
  */
 function handleNewChatMember(chatMember, services, config) {
     // This is the crucial check: only trigger on a real user join.
-    const isRealJoin = (chatMember.old_chat_member.status === 'left' || chatMember.old_chat_member.status === 'kicked') 
+    const isRealJoin = (chatMember.old_chat_member.status === 'left')
                      && chatMember.new_chat_member.status === 'member';
     if (!isRealJoin) return;
 
@@ -269,6 +289,7 @@ function handleNewChatMember(chatMember, services, config) {
     }
 }
 
+
 /**
  * Handles callback queries from CAPTCHA buttons.
  */
@@ -284,7 +305,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
         sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Эта кнопка не для вас!', show_alert: true });
         return;
     }
-    
+
     unmuteUser(chat.id, user.id);
     deleteMessage(chat.id, messageId);
     sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '✅ Проверка пройдена!' });
@@ -305,7 +326,7 @@ function handleMessage(message, services, config) {
     if (String(chat.id) === String(user.id)) return; // Ignore private messages to bot
 
     if (isAdmin(chat.id, user.id, services.cache)) return;
-    
+
     const isMember = isUserSubscribed(user.id, config.target_channel_id);
     if (isMember) {
         services.cache.remove(`violations_${user.id}`);
@@ -349,13 +370,13 @@ function getCachedConfig() {
         const configSheet = ss.getSheetByName('Config');
         const textsSheet = ss.getSheetByName('Texts');
         const whitelistSheet = ss.getSheetByName('Whitelist');
-        
+
         if (configSheet) {
           configSheet.getDataRange().getValues().slice(1).forEach(row => {
               if (row[0]) {
                   const key = row[0];
                   const value = row[1];
-                  if (typeof config[key] === 'boolean') { 
+                  if (typeof config[key] === 'boolean') {
                       config[key] = (String(value).toLowerCase() === 'true');
                   } else if (typeof config[key] === 'number') {
                       config[key] = isNaN(Number(value)) || value === '' ? config[key] : Number(value);
@@ -370,13 +391,13 @@ function getCachedConfig() {
         if (textsSheet) {
             const textData = textsSheet.getDataRange().getValues().slice(1).filter(row => row[0] && row[1]); // Filter rows with key and value
             if (textData.length > 0) {
-                config.texts = {}; // Overwrite only if new data exists
-                textData.forEach(row => {
+                 config.texts = config.texts || {}; // Ensure texts object exists
+                 textData.forEach(row => {
                     config.texts[row[0]] = row[1];
                 });
             }
         }
-        
+
         config.authorized_chat_ids = String(config.authorized_chat_ids || '').split(/\n|,|\s+/).filter(Boolean);
         config.whitelist_ids = whitelistSheet ? whitelistSheet.getDataRange().getValues().slice(1).map(row => String(row[0])).filter(Boolean) : [];
 
@@ -414,31 +435,47 @@ function isUserSubscribed(userId, channelId) {
 }
 
 function applyProgressiveMute(chatId, user, services, config) {
-    const lock = services.lock; lock.waitLock(15000);
+    const lock = services.lock;
+    lock.waitLock(15000);
     try {
-        const usersSheet = services.ss.getSheetByName('Users'); if (!usersSheet) return;
+        const usersSheet = services.ss.getSheetByName('Users');
+        if (!usersSheet) return;
+
         const userId = user.id;
         const userData = findRow(usersSheet, userId, 1);
-        const newLevel = (userData ? Number(userData.row[1]) : 0) + 1;
+        const currentLevel = userData ? Number(userData.row[1]) : 0;
+        const newLevel = currentLevel + 1;
 
         let muteDurationMin;
-        if (newLevel === 1) muteDurationMin = config.mute_level_1_duration_min;
-        else if (newLevel === 2) muteDurationMin = config.mute_level_2_duration_min;
-        else muteDurationMin = config.mute_level_3_duration_min;
+        if (newLevel === 1) {
+            muteDurationMin = config.mute_level_1_duration_min;
+        } else if (newLevel === 2) {
+            muteDurationMin = config.mute_level_2_duration_min;
+        } else { // Level 3 and beyond
+            muteDurationMin = config.mute_level_3_duration_min;
+        }
 
         const muteUntil = Math.floor(new Date().getTime() / 1000 + muteDurationMin * 60);
         restrictUser(chatId, userId, false, muteUntil);
 
-        if (userData) { usersSheet.getRange(userData.rowIndex, 2).setValue(newLevel); } 
-        else { usersSheet.appendRow([userId, newLevel, new Date()]); }
+        if (userData) {
+            usersSheet.getRange(userData.rowIndex, 2).setValue(newLevel);
+        } else {
+            usersSheet.appendRow([userId, newLevel, new Date()]);
+        }
 
-        const text = config.texts.sub_mute_text.replace('{user_mention}', getMention(user)).replace('{duration}', muteDurationMin);
+        const text = config.texts.sub_mute_text
+            .replace('{user_mention}', getMention(user))
+            .replace('{duration}', muteDurationMin);
         const sentMuteMsg = sendTelegram('sendMessage', { chat_id: chatId, text: text, parse_mode: 'HTML' });
         if (sentMuteMsg?.ok) {
             addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 45, services);
         }
-    } finally { lock.releaseLock(); }
+    } finally {
+        lock.releaseLock();
+    }
 }
+
 
 function addMessageToCleaner(chatId, messageId, delaySec, services) {
     const lock = services.lock; lock.waitLock(10000);
@@ -457,10 +494,10 @@ function messageCleaner() {
         const props = PropertiesService.getScriptProperties();
         const queueStr = props.getProperty('deleteQueue');
         if (!queueStr) return;
-        
+
         const now = new Date().getTime();
         let queue = JSON.parse(queueStr);
-        
+
         const remainingItems = queue.filter(item => now < item.deleteAt);
         const itemsToDelete = queue.filter(item => now >= item.deleteAt);
 
@@ -491,7 +528,7 @@ function findRow(sheet, value, column) {
 }
 
 // =================================================================================
-// =========================  F. TELEGRAM API & LOGGING  =========================
+// =========================  F. TELEGRAM API & LOGGING  =========================_
 // =================================================================================
 
 function sendTelegram(method, payload) {
