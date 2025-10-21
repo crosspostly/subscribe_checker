@@ -290,9 +290,17 @@ function handleUpdate(update) {
         }
 
         // 5. Skip admins for MESSAGE events only (other events need admin processing for permissions)
-        if (update.message && isAdmin(chat.id, user.id, services.cache)) {
-            logToSheet('DEBUG', `Admin ${user.id} in message event. Ignoring.`);
-            return;
+        if (update.message) {
+            logToSheet('DEBUG', `[handleUpdate] Checking admin status for user ${user.id} in chat ${chat.id}`);
+            logToTestSheet('handleUpdate DEBUG', '🔍 DEBUG', `Checking admin status: user ${user.id}, chat ${chat.id}`, '');
+            const userIsAdmin = isAdmin(chat.id, user.id, services.cache);
+            logToSheet('DEBUG', `[handleUpdate] Admin check result for user ${user.id}: ${userIsAdmin}`);
+            logToTestSheet('handleUpdate DEBUG', '🔍 DEBUG', `Admin check result: user ${user.id}, isAdmin=${userIsAdmin}`, '');
+            if (userIsAdmin) {
+                logToSheet('DEBUG', `[handleUpdate] Admin ${user.id} in message event. Ignoring.`);
+                logToTestSheet('handleUpdate DEBUG', '🔍 DEBUG', `SKIPPING: Admin ${user.id} in message event`, '');
+                return;
+            }
         }
     }
 
@@ -358,80 +366,94 @@ function handleNewChatMember(chatMember, services, config) {
     const user = chatMember.new_chat_member.user;
     const oldStatus = chatMember.old_chat_member?.status;
     const newStatus = chatMember.new_chat_member.status;
+    const fromUser = chatMember.from;
 
-    logToSheet('DEBUG', `ChatMember Event: chat_id=${chat.id}, user_id=${user.id}, old_status=${oldStatus}, new_status=${newStatus}`);
-    logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Processing chat_member event: user ${user.id}, status ${oldStatus} -> ${newStatus} in chat ${chat.id}`, '');
+    logToSheet('DEBUG', `[handleNewChatMember] ChatMember Event: chat_id=${chat.id}, user_id=${user.id}, from_id=${fromUser?.id}, old_status=${oldStatus}, new_status=${newStatus}`);
+    logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Processing chat_member event: user ${user.id}, from ${fromUser?.id}, status ${oldStatus} -> ${newStatus} in chat ${chat.id}`, '');
 
     // Skip if event is about the bot itself
     const botId = getBotId();
     if (botId && user.id === botId) {
-        logToSheet('INFO', `Bot join event in chat ${chat.id}. No action needed.`);
+        logToSheet('INFO', `[handleNewChatMember] Bot join event in chat ${chat.id}. No action needed.`);
+        logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Bot itself ${user.id}`, '');
         return;
     }
 
     // Skip negative IDs (channels acting as users)
     if (user.id < 0) {
-        logToSheet('INFO', `Channel as user event (ID: ${user.id}) in chat ${chat.id}. Skipping.`);
+        logToSheet('INFO', `[handleNewChatMember] Channel as user event (ID: ${user.id}) in chat ${chat.id}. Skipping.`);
+        logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Negative ID (channel) ${user.id}`, '');
         return;
     }
 
     // Skip system accounts and other bots
     if (user.is_bot || IGNORED_USER_IDS.includes(String(user.id))) {
-        logToSheet('INFO', `Bot or system account ${user.id} in chat ${chat.id}. Skipping member processing.`);
+        logToSheet('INFO', `[handleNewChatMember] Bot or system account ${user.id} in chat ${chat.id}. Skipping member processing.`);
+        logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Bot/system account ${user.id}`, '');
         return;
     }
 
-    // Define what constitutes a "real join" - more nuanced logic
-    // For test compatibility: if 'from' exists and is different from user, it's admin action
-    // If 'from' doesn't exist or equals user.id, it's user-initiated
-    const isInitiatedByUser = !chatMember.from || Number(chatMember.from.id) === Number(user.id);
+    // CRITICAL FIX: Determine if this is a real user-initiated join
+    // If 'from' field is missing, we default to assuming it's user-initiated (backwards compatibility)
+    // If 'from' exists and differs from the user, it's an admin action (unmute/invite)
+    const isInitiatedByUser = !fromUser || Number(fromUser.id) === Number(user.id);
     
-    logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Join analysis: from=${chatMember.from?.id}, user=${user.id}, isInitiatedByUser=${isInitiatedByUser}`, '');
+    logToSheet('DEBUG', `[handleNewChatMember] Join analysis: from=${fromUser?.id}, user=${user.id}, isInitiatedByUser=${isInitiatedByUser}`);
+    logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Join analysis: from=${fromUser?.id}, user=${user.id}, isInitiatedByUser=${isInitiatedByUser}`, '');
     
-    // Define what constitutes a "real join" - more comprehensive than before
+    // Define what constitutes a "real join" requiring CAPTCHA
+    // Real join = user-initiated AND transitioning to 'member' from a non-member state
     const isRealJoin = isInitiatedByUser && (
         // Standard join: left/kicked -> member
         ((oldStatus === 'left' || oldStatus === 'kicked') && newStatus === 'member') ||
         // First time join: no old status -> member  
-        (!oldStatus && newStatus === 'member') ||
-        // Approved from restricted -> member (after passing captcha)
-        (oldStatus === 'restricted' && newStatus === 'member')
+        (!oldStatus && newStatus === 'member')
     );
+    
+    // IMPORTANT: restricted -> member should NOT trigger CAPTCHA (that's CAPTCHA passing)
+    // Admin actions should NOT trigger CAPTCHA (isInitiatedByUser = false)
 
+    logToSheet('DEBUG', `[handleNewChatMember] Real join check: isRealJoin=${isRealJoin}, oldStatus=${oldStatus}, newStatus=${newStatus}`);
     logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Real join check: isRealJoin=${isRealJoin}, reasons: ${oldStatus}->${newStatus}, initiated by user: ${isInitiatedByUser}`, '');
 
     if (!isRealJoin) {
-        logToSheet('DEBUG', `Non-join event for user ${user.id} in chat ${chat.id}: ${oldStatus} -> ${newStatus}. Skipping.`);
+        logToSheet('DEBUG', `[handleNewChatMember] Non-join event for user ${user.id} in chat ${chat.id}: ${oldStatus} -> ${newStatus}. Skipping.`);
         logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Non-join event for user ${user.id}: ${oldStatus} -> ${newStatus}`, '');
         return;
     }
 
-    // Skip admins
+    // Skip admins - check AFTER determining it's a real join
     const userIsAdmin = isAdmin(chat.id, user.id, services.cache);
+    logToSheet('DEBUG', `[handleNewChatMember] Admin check for user ${user.id}: isAdmin=${userIsAdmin}`);
     logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Admin check for user ${user.id}: isAdmin=${userIsAdmin}`, '');
     
     if (userIsAdmin) {
-        logToSheet('INFO', `Admin ${user.id} joined chat ${chat.id}. No CAPTCHA needed.`);
+        logToSheet('INFO', `[handleNewChatMember] Admin ${user.id} joined chat ${chat.id}. No CAPTCHA needed.`);
         logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Admin user ${user.id} joined chat ${chat.id}`, '');
         return;
     }
 
-    logToSheet('INFO', `Real user join detected: ${user.first_name || 'User'} (${user.id}) in chat ${chat.id}.`);
+    logToSheet('INFO', `[handleNewChatMember] Real user join detected: ${user.first_name || 'User'} (${user.id}) in chat ${chat.id}.`);
     logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `PROCESSING: Real user join detected for user ${user.id}`, '');
 
     // Check if bot has necessary permissions (only for real joins)
     const botInfo = sendTelegram('getChatMember', { chat_id: chat.id, user_id: getBotId() });
     if (!botInfo?.ok || !botInfo.result?.can_restrict_members || !botInfo.result?.can_delete_messages) {
-        logToSheet('WARN', `Bot lacks required permissions in chat ${chat.id}. Cannot handle member events properly.`);
+        logToSheet('WARN', `[handleNewChatMember] Bot lacks required permissions in chat ${chat.id}. Cannot handle member events properly.`);
+        logToTestSheet('handleNewChatMember DEBUG', '⚠️ WARN', `Bot lacks permissions in chat ${chat.id}`, '');
         return;
     }
 
     // Apply CAPTCHA logic
+    logToSheet('INFO', `[handleNewChatMember] Applying CAPTCHA to user ${user.id} in chat ${chat.id}`);
     const muteUntil = Math.floor(Date.now() / 1000) + (config.captcha_mute_duration_min * 60);
     const restrictResult = restrictUser(chat.id, user.id, false, muteUntil);
     
+    logToSheet('DEBUG', `[handleNewChatMember] Restrict result for user ${user.id}: ok=${restrictResult?.ok}, error=${restrictResult?.description}`);
+    
     if (!restrictResult?.ok) {
-        logToSheet('ERROR', `Failed to restrict user ${user.id} in chat ${chat.id}: ${restrictResult?.description}`);
+        logToSheet('ERROR', `[handleNewChatMember] Failed to restrict user ${user.id} in chat ${chat.id}: ${restrictResult?.description}`);
+        logToTestSheet('handleNewChatMember DEBUG', '❌ ERROR', `Failed to restrict user ${user.id}: ${restrictResult?.description}`, '');
         return;
     }
 
@@ -450,11 +472,15 @@ function handleNewChatMember(chatMember, services, config) {
         reply_markup: JSON.stringify(keyboard)
     });
 
+    logToSheet('DEBUG', `[handleNewChatMember] Send message result: ok=${sentMessage?.ok}, message_id=${sentMessage?.result?.message_id}`);
+
     if (sentMessage?.ok) {
-        logToSheet('INFO', `CAPTCHA sent to ${user.id} in chat ${chat.id}, message_id: ${sentMessage.result.message_id}`);
+        logToSheet('INFO', `[handleNewChatMember] CAPTCHA sent to ${user.id} in chat ${chat.id}, message_id: ${sentMessage.result.message_id}`);
+        logToTestSheet('handleNewChatMember DEBUG', '✅ SUCCESS', `CAPTCHA sent to user ${user.id}, message ${sentMessage.result.message_id}`, '');
         addMessageToCleaner(chat.id, sentMessage.result.message_id, config.captcha_message_timeout_sec, services);
     } else {
-        logToSheet('ERROR', `Failed to send CAPTCHA to user ${user.id} in chat ${chat.id}: ${sentMessage?.description}`);
+        logToSheet('ERROR', `[handleNewChatMember] Failed to send CAPTCHA to user ${user.id} in chat ${chat.id}: ${sentMessage?.description}`);
+        logToTestSheet('handleNewChatMember DEBUG', '❌ ERROR', `Failed to send CAPTCHA to user ${user.id}: ${sentMessage?.description}`, '');
     }
 }
 
@@ -566,10 +592,16 @@ function handleMessage(message, services, config) {
     const user = message.from;
     const chat = message.chat;
     
+    logToSheet('DEBUG', `[handleMessage] Processing message from user ${user.id} in chat ${chat.id}`);
+    logToTestSheet('handleMessage DEBUG', '🔍 DEBUG', `Processing message: user ${user.id}, chat ${chat.id}`, '');
+    
     // Check subscription status
     const isMember = isUserSubscribed(user.id, config.target_channel_id);
+    logToSheet('DEBUG', `[handleMessage] Subscription check for user ${user.id}: isMember=${isMember}`);
+    
     if (isMember) {
         services.cache.remove(`violations_${user.id}`);
+        logToSheet('DEBUG', `[handleMessage] User ${user.id} is subscribed, allowing message`);
         return;
     }
 
