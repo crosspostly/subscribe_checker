@@ -7,7 +7,14 @@
 // ======================  A. TEST RUNNER & FRAMEWORK  ===========================
 // =================================================================================
 
-function runAllTests() {
+// ==================================================================================
+// =====================  ENHANCED TESTING WITH TABLE LOGGING  ===================
+// ==================================================================================
+
+/**
+ * Runs all tests with enhanced logging to Tests sheet
+ */
+function runAllTestsWithLogging() {
   const testResults = { passed: 0, failed: 0, total: 0, failures: [] };
   const testFunctions = [
     test_handleNewChatMember_onRealJoin,
@@ -46,7 +53,102 @@ function runAllTests() {
     test_handleUpdate_optimizedFiltering_normalUserPasses
   ];
 
-  Logger.log("====== STARTING BOT TEST SUITE (ENHANCED) ======");
+  // Log test start to Tests sheet
+  logToTestSheet("🚀 STARTING BOT TEST SUITE", "INFO", `Starting ${testFunctions.length} tests`);
+
+  let originalServices = {};
+
+  testFunctions.forEach(testFunc => {
+    const testName = testFunc.name;
+    testResults.total++;
+    let mocks = null;
+    
+    logToTestSheet(`Starting: ${testName}`, "TEST", "Initializing test environment");
+    
+    try {
+      mocks = getMockServicesAndData(originalServices); // Setup mocks and get them
+      testFunc(mocks); // Pass mocks into the test function
+      testResults.passed++;
+      
+      logToTestSheet(`✅ PASSED: ${testName}`, "PASS", "Test completed successfully");
+      Logger.log(`✅ PASSED: ${testName}`);
+      
+    } catch (e) {
+      testResults.failed++;
+      testResults.failures.push({ name: testName, error: e.message, stack: e.stack });
+      
+      logToTestSheet(`❌ FAILED: ${testName}`, "FAIL", `Error: ${e.message}`);
+      Logger.log(`❌ FAILED: ${testName} - ${e.message}`);
+      
+    } finally {
+       if (mocks) mocks.cleanup(originalServices); // Always cleanup
+    }
+  });
+
+  // Log final results to Tests sheet
+  logToTestSheet("🏁 TEST SUITE COMPLETE", "INFO", 
+    `Results: ${testResults.passed} passed, ${testResults.failed} failed out of ${testResults.total} total tests`);
+
+  Logger.log("------ TEST SUITE COMPLETE ------");
+  Logger.log(`Results: ${testResults.passed} passed, ${testResults.failed} failed out of ${testResults.total} total tests.`);
+
+  if (testResults.failed > 0) {
+    Logger.log("\n------ FAILURE DETAILS ------");
+    testResults.failures.forEach(failure => { 
+      Logger.log(`\n--- ❌ ${failure.name} ---\nError: ${failure.error}\nStack: ${failure.stack || 'no stack'}\n`);
+      logToTestSheet(`FAILURE DETAIL: ${failure.name}`, "ERROR", 
+        `Error: ${failure.error}\nStack: ${failure.stack || 'No stack trace available'}`);
+    });
+    logToTestSheet(`❌ ${testResults.failed} TESTS FAILED`, "SUMMARY", "Check failure details above");
+  } else {
+    logToTestSheet(`✅ ALL ${testResults.total} TESTS PASSED`, "SUMMARY", "Test suite completed successfully");
+  }
+  
+  // CRITICAL: Return the testResults object so runTestsFromMenu can access it
+  return testResults;
+}
+
+/**
+ * Legacy test runner for backward compatibility (uses popups, no sheet logging)
+ */
+function runAllTests() {
+  const testResults = { passed: 0, failed: 0, total: 0, failures: [] };
+  const testFunctions = [
+    test_handleNewChatMember_onRealJoin,
+    test_handleNewChatMember_ignoresFalseJoin,
+    test_handleNewChatMember_ignoresAdminJoin,
+    test_handleUpdate_doesNothingWhenBotIsDisabled,
+    test_handleUpdate_ignoresUnauthorizedChats,
+    test_handleUpdate_ignoresWhitelistedUser,
+    test_handleUpdate_ignoresWhitelistedChannelPost,
+    test_handleMessage_notSubscribed_sendsWarningOnFirstViolation,
+    test_handleMessage_notSubscribed_mutesOnLimitReached,
+    test_isUserSubscribed_returnsTrueWhenChannelNotSet,
+    test_getCachedConfig_fallsBackToDefaults,
+    test_getCachedConfig_usesSheetValues,
+    test_messageCleaner_deletesExpiredMessages,
+    test_handleNewChatMember_checksPermissions,
+    test_handleNewChatMember_skipsBotItself,
+    test_handleNewChatMember_skipsSystemAccounts,
+    test_handleNewChatMember_detectsRealJoins,
+    test_handleChatJoinRequest_approvesUsers,
+    test_handleCallbackQuery_subscriptionCheck_success,
+    test_handleCallbackQuery_subscriptionCheck_failure,
+    test_handleMessage_withChannelUrl_createsButtons,
+    test_getBotId_cachesResult,
+    test_sendTelegram_handlesErrors,
+    test_getCachedConfig_handlesChannelUrl,
+    test_handleUpdate_optimizedFiltering_whitelistedUser,
+    test_handleUpdate_optimizedFiltering_adminUser,
+    test_handleUpdate_optimizedFiltering_botUser,
+    test_handleUpdate_optimizedFiltering_systemAccount,
+    test_handleUpdate_optimizedFiltering_privateMessage,
+    test_handleUpdate_optimizedFiltering_channelPost,
+    test_handleUpdate_optimizedFiltering_whitelistedChannel,
+    test_handleUpdate_optimizedFiltering_normalUserPasses
+  ];
+
+  Logger.log("------ STARTING BOT TEST SUITE (LEGACY) ------");
 
   let originalServices = {};
 
@@ -55,8 +157,8 @@ function runAllTests() {
     testResults.total++;
     let mocks = null;
     try {
-      mocks = getMockServicesAndData(originalServices); // Setup mocks and get them
-      testFunc(mocks); // Pass mocks into the test function
+      mocks = getMockServicesAndData(originalServices);
+      testFunc(mocks);
       testResults.passed++;
       Logger.log(`✅ PASSED: ${testName}`);
     } catch (e) {
@@ -64,20 +166,22 @@ function runAllTests() {
       testResults.failures.push({ name: testName, error: e.message, stack: e.stack });
       Logger.log(`❌ FAILED: ${testName} - ${e.message}`);
     } finally {
-       if (mocks) mocks.cleanup(originalServices); // Always cleanup
+       if (mocks) mocks.cleanup(originalServices);
     }
   });
 
-  Logger.log("====== TEST SUITE COMPLETE ======");
+  Logger.log("------ TEST SUITE COMPLETE ------");
   Logger.log(`Results: ${testResults.passed} passed, ${testResults.failed} failed out of ${testResults.total} total tests.`);
 
   if (testResults.failed > 0) {
-    Logger.log("\n====== FAILURE DETAILS ======");
+    Logger.log("\n------ FAILURE DETAILS ------");
     testResults.failures.forEach(failure => { Logger.log(`\n--- ❌ ${failure.name} ---\nError: ${failure.error}\nStack: ${failure.stack || 'no stack'}\n`); });
     try { SpreadsheetApp.getUi().alert(`Test suite finished with ${testResults.failed} failures. Check logs.`); } catch (e) {}
   } else {
     try { SpreadsheetApp.getUi().alert(`✅ All ${testResults.total} tests passed successfully!`); } catch (e) {}
   }
+  
+  return testResults;
 }
 
 function assert(condition, message) { if (!condition) throw new Error(message || "Assertion failed"); }
@@ -152,20 +256,49 @@ function getMockServicesAndData(originalServices) {
 
 function test_handleNewChatMember_onRealJoin(mocks) {
   const update = { chat_member: { chat: { id: -100999 }, from: { id: 456, is_bot: false }, old_chat_member: { status: 'left' }, new_chat_member: { status: 'member', user: { id: 456, is_bot: false } } } };
+  
+  // DEBUG: Log what we're testing
+  logTestDebug('test_handleNewChatMember_onRealJoin', `Testing real join event: user ${update.chat_member.new_chat_member.user.id}, ${update.chat_member.old_chat_member.status} -> ${update.chat_member.new_chat_member.status}`);
+  
   handleUpdate(update);
-  assert(mocks.urlFetchLog.find(c => c.method === 'restrictChatMember'), "User should be muted");
-  assert(mocks.urlFetchLog.find(c => c.method === 'sendMessage'), "CAPTCHA message should be sent");
+  
+  // DEBUG: Log API calls made
+  logTestDebug('test_handleNewChatMember_onRealJoin', `API calls made: ${mocks.urlFetchLog.map(c => c.method).join(', ')} (total: ${mocks.urlFetchLog.length})`);
+  
+  const restrictCall = mocks.urlFetchLog.find(c => c.method === 'restrictChatMember');
+  const sendCall = mocks.urlFetchLog.find(c => c.method === 'sendMessage');
+  
+  logTestDebug('test_handleNewChatMember_onRealJoin', `Restrict call found: ${!!restrictCall}, Send call found: ${!!sendCall}`);
+  
+  assert(restrictCall, "User should be muted");
+  assert(sendCall, "CAPTCHA message should be sent");
 }
 
 function test_handleNewChatMember_ignoresFalseJoin(mocks) {
   const update = { chat_member: { chat: { id: -100999 }, from: { id: 999 }, old_chat_member: { status: 'restricted' }, new_chat_member: { status: 'member', user: { id: 456 } } } };
+  
+  // DEBUG: Log what we're testing
+  logTestDebug('test_handleNewChatMember_ignoresFalseJoin', `Testing false join event: user ${update.chat_member.new_chat_member.user.id}, from user ${update.chat_member.from.id}, ${update.chat_member.old_chat_member.status} -> ${update.chat_member.new_chat_member.status}`);
+  
   handleUpdate(update);
+  
+  // DEBUG: Log API calls made
+  logTestDebug('test_handleNewChatMember_ignoresFalseJoin', `API calls made: ${mocks.urlFetchLog.map(c => c.method).join(', ')} (total: ${mocks.urlFetchLog.length})`);
+  
   assert(mocks.urlFetchLog.length === 0, "Expected 0 API calls for a false join, but got " + mocks.urlFetchLog.length);
 }
 
 function test_handleNewChatMember_ignoresAdminJoin(mocks) {
   const update = { chat_member: { chat: { id: -100999 }, from: { id: 999 }, old_chat_member: { status: 'left' }, new_chat_member: { status: 'member', user: { id: 999, is_bot: false } } } };
+  
+  // DEBUG: Log what we're testing
+  logTestDebug('test_handleNewChatMember_ignoresAdminJoin', `Testing admin join event: user ${update.chat_member.new_chat_member.user.id} (admin), ${update.chat_member.old_chat_member.status} -> ${update.chat_member.new_chat_member.status}`);
+  
   handleUpdate(update);
+  
+  // DEBUG: Log API calls made
+  logTestDebug('test_handleNewChatMember_ignoresAdminJoin', `API calls made: ${mocks.urlFetchLog.map(c => c.method).join(', ')} (total: ${mocks.urlFetchLog.length})`);
+  
   assert(mocks.urlFetchLog.find(c => c.method === 'getChatAdministrators'), "Should check for admins");
   assert(mocks.urlFetchLog.length === 1, "No CAPTCHA should be sent for an admin, only getChatAdministrators call. Got: " + mocks.urlFetchLog.length);
 }
@@ -305,6 +438,8 @@ function test_handleNewChatMember_detectsRealJoins(mocks) {
         { old: 'member', new: 'restricted', shouldProcess: false }
     ];
     
+    logTestDebug('test_handleNewChatMember_detectsRealJoins', `Testing ${scenarios.length} different join scenarios`);
+    
     scenarios.forEach((scenario, index) => {
         mocks.urlFetchLog = []; // Clear log between tests
         const update = { chat_member: { 
@@ -312,9 +447,15 @@ function test_handleNewChatMember_detectsRealJoins(mocks) {
             old_chat_member: scenario.old ? { status: scenario.old } : null, 
             new_chat_member: { status: scenario.new, user: { id: 456 + index, is_bot: false } } 
         } };
+        
+        logTestDebug('test_handleNewChatMember_detectsRealJoins', `Scenario ${index}: Testing ${scenario.old} -> ${scenario.new} (should process: ${scenario.shouldProcess})`);
+        
         handleUpdate(update);
         
         const hasRestrict = mocks.urlFetchLog.some(c => c.method === 'restrictChatMember');
+        
+        logTestDebug('test_handleNewChatMember_detectsRealJoins', `Scenario ${index} result: API calls made: ${mocks.urlFetchLog.map(c => c.method).join(', ')}, hasRestrict: ${hasRestrict}`);
+        
         if (scenario.shouldProcess) {
             assert(hasRestrict, `Scenario ${index}: Should process join ${scenario.old} -> ${scenario.new}`);
         } else {
@@ -472,12 +613,19 @@ function test_handleUpdate_optimizedFiltering_adminUser(mocks) {
         return originalFetch(url, params);
     };
     
+    logTestDebug('test_handleUpdate_optimizedFiltering_adminUser', 'Testing admin user filtering - should check for admins but not process message');
+    
     const update = { message: { chat: { id: -100999 }, from: { id: 9999, is_bot: false }, message_id: 987 } };
     handleUpdate(update);
+    
+    // DEBUG: Log API calls made
+    logTestDebug('test_handleUpdate_optimizedFiltering_adminUser', `API calls made: ${mocks.urlFetchLog.map(c => c.method).join(', ')} (total: ${mocks.urlFetchLog.length})`);
     
     // Should only make getChatAdministrators call, then filter out
     const adminCall = mocks.urlFetchLog.find(c => c.method === 'getChatAdministrators');
     const deleteCall = mocks.urlFetchLog.find(c => c.method === 'deleteMessage');
+    
+    logTestDebug('test_handleUpdate_optimizedFiltering_adminUser', `Admin call found: ${!!adminCall}, Delete call found: ${!!deleteCall}`);
     
     assert(adminCall, "Should check for admins");
     assert(!deleteCall, "Admin user should be filtered out - no message deletion");
