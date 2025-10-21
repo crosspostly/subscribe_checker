@@ -216,10 +216,21 @@ function getMockServicesAndData(originalServices) {
       const payload = params ? JSON.parse(params.payload) : {};
       const method = url.substring(url.lastIndexOf('/') + 1);
       urlFetchLog.push({ method, payload });
+
       let apiResult = { ok: true, result: { message_id: 12345 } };
+
       if (method === 'getChatAdministrators') {
-        apiResult = { ok: true, result: [ {user: {id: 999, is_bot: false}} ] };
+        apiResult = { ok: true, result: [ { user: { id: 999, is_bot: false } } ] };
+      } else if (method === 'getChatMember') {
+        const targetUserId = payload ? payload.user_id : undefined;
+        const isBotPermissionCheck = targetUserId === null || typeof targetUserId === 'undefined' || targetUserId === '';
+        if (isBotPermissionCheck) {
+          apiResult = { ok: true, result: { can_restrict_members: true, can_delete_messages: true, status: 'administrator' } };
+        } else {
+          apiResult = { ok: true, result: { status: 'left' } };
+        }
       }
+
       return { getContentText: () => JSON.stringify(apiResult), getResponseCode: () => 200 };
     },
   };
@@ -608,6 +619,8 @@ function test_handleUpdate_optimizedFiltering_adminUser(mocks) {
     const originalFetch = UrlFetchApp.fetch;
     UrlFetchApp.fetch = (url, params) => {
         if (url.includes('getChatAdministrators')) {
+            const payload = params ? JSON.parse(params.payload) : {};
+            mocks.urlFetchLog.push({ method: 'getChatAdministrators', payload });
             return { getContentText: () => JSON.stringify({ ok: true, result: [{ user: { id: 9999, is_bot: false } }] }) };
         }
         return originalFetch(url, params);
