@@ -14,6 +14,7 @@
  */
 const DEFAULT_CONFIG = {
   bot_enabled: true,
+  extended_logging_enabled: false,
   target_channel_id: "", // IMPORTANT: Must be a numeric ID (e.g., -100123456789)
   target_channel_url: "", // Public URL of the target channel (e.g., https://t.me/my_channel)
   authorized_chat_ids: "", // List of chat IDs where the bot should operate, one per line
@@ -35,6 +36,19 @@ const DEFAULT_CONFIG = {
 /** System user IDs to always ignore. 136817688 is "Group" (anonymous admin), 777000 is "Telegram" (channel posts). */
 const IGNORED_USER_IDS = ['136817688', '777000'];
 
+/**
+ * Stores the most recent logging configuration to avoid recalculating for every helper call.
+ */
+const LOGGING_CONTEXT = { extended_logging_enabled: false };
+
+function setLoggingContext(flagOrConfig) {
+  if (typeof flagOrConfig === 'boolean') {
+    LOGGING_CONTEXT.extended_logging_enabled = flagOrConfig;
+  } else {
+    LOGGING_CONTEXT.extended_logging_enabled = !!(flagOrConfig && flagOrConfig.extended_logging_enabled);
+  }
+}
+
 // =================================================================================
 // =================  B. SPREADSHEET UI & MANUAL CONTROLS  ====================_
 // =================================================================================
@@ -49,6 +63,7 @@ function onOpen() {
     .addSeparator()
     .addItem('🟢 Включить бота', 'userEnableBot')
     .addItem('🔴 Выключить бота', 'userDisableBot')
+    .addItem('📘 Переключить расширенные логи', 'userToggleExtendedLogging')
     .addSeparator()
     .addItem('🧪 Запустить тесты', 'runTestsFromMenu')
     .addItem('🔄 Сбросить кэш (Настройки и Админы)', 'userClearCache')
@@ -59,6 +74,32 @@ function onOpen() {
 function userEnableBot() { enableBot(true); }
 function userDisableBot() { disableBot(true); }
 function userClearCache() { clearCache(true); }
+function userToggleExtendedLogging() { toggleExtendedLogging(true); }
+
+/**
+ * Toggles extended event logging and updates the Config sheet accordingly.
+ * @param {boolean} showAlert Whether to show UI feedback.
+ */
+function toggleExtendedLogging(showAlert) {
+  const config = getCachedConfig();
+  const newState = !config.extended_logging_enabled;
+
+  updateConfigValue('extended_logging_enabled', newState, newState ? '📘 Расширенные логи: ВКЛ' : '📕 Расширенные логи: ВЫКЛ');
+  setLoggingContext(newState);
+
+  const message = newState
+    ? '🔔 Расширенное логирование включено. Все события и реакции бота будут фиксироваться на листе "Events".'
+    : 'ℹ️ Расширенное логирование отключено. Запись событий в лист "Events" приостановлена.';
+
+  logToSheet('INFO', message);
+  logEventTrace(LOGGING_CONTEXT, 'settings', newState ? 'enable_extended_logging' : 'disable_extended_logging', message, { extended_logging: newState }, true);
+
+  if (showAlert) {
+    try { SpreadsheetApp.getUi().alert(message); } catch (e) {}
+  }
+
+  return newState;
+}
 
 /**
  * Enables the bot by setting the 'bot_enabled' flag to true.
@@ -68,6 +109,17 @@ function enableBot(showAlert) {
   updateConfigValue('bot_enabled', true, '🟢 Бот ВКЛЮЧЕН');
   if (showAlert) {
     try { SpreadsheetApp.getUi().alert('✅ Бот включен. Он начнет обрабатывать новые события.'); } catch(e) {}
+  }
+
+  const healthCheck = sendTelegram('getMe', {});
+  if (healthCheck?.ok) {
+    const botName = healthCheck.result?.username || healthCheck.result?.id;
+    logToSheet('INFO', `🤖 Бот успешно включен. Telegram ответил: ${botName}`);
+    logToTestSheet('enableBot', 'INFO', 'Бот включён, запрос проверки прошёл успешно', JSON.stringify(healthCheck.result || {}));
+  } else {
+    const issue = healthCheck?.description || 'нет ответа';
+    logToSheet('WARN', `⚠️ Попытка включить бота не подтверждена Telegram: ${issue}`);
+    logToTestSheet('enableBot', 'WARN', 'Бот включён, но проверка с Telegram не прошла', issue);
   }
 }
 
@@ -153,6 +205,7 @@ function _createSheets() {
     "Config": [
         ["key", "value", "description"],
         ["bot_enabled", true, "TRUE/FALSE. Управляется через меню."],
+        ["extended_logging_enabled", false, "TRUE/FALSE. Расширенные логи событий Telegram."],
         ["target_channel_id", "-100...", "ЧИСЛОВОЙ ID канала для проверки подписки."],
         ["target_channel_url", "", "ПУБЛИЧНАЯ ссылка на канал (https://t.me/...)"],
         ["authorized_chat_ids", "-100...\n-100...", "ID чатов, где работает бот (каждый с новой строки)"],
@@ -173,6 +226,7 @@ function _createSheets() {
     ],
     "Users": [["user_id", "mute_level", "first_violation_date"]],
     "Logs": [["Timestamp", "Level", "Message"]],
+    "Events": [["Timestamp", "Event", "Action", "Details", "Payload"]],
     "Tests": [["Timestamp", "Test Name", "Status", "Details", "API Calls"]],
     "Whitelist": [["user_id_or_channel_id", "comment"], ["12345678", "Пример: другой мой бот"]]
   };
@@ -231,65 +285,65 @@ function doPost(e) {
  */
 function handleUpdate(update) {
     const config = getCachedConfig();
-    if (!config.bot_enabled) return; // Task #3: Check if bot is enabled
+    setLoggingContext(config);
+    logEventTrace(config, 'update', 'received', 'Получено новое обновление от Telegram', update);
+
+    if (!config.bot_enabled) {
+        logEventTrace(config, 'update', 'ignored', 'Бот отключен, обновление пропущено', { reason: 'bot_disabled' });
+        return;
+    }
 
     logToSheet('DEBUG', JSON.stringify(update));
 
     const chat = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat || update.chat_join_request?.chat;
-    if (!chat) return;
+    if (!chat) {
+        logEventTrace(config, 'update', 'ignored', 'Чат не обнаружен в обновлении', { keys: Object.keys(update || {}) });
+        return;
+    }
 
-    // Task #5: Check if the chat is authorized
     if (config.authorized_chat_ids.length > 0 && !config.authorized_chat_ids.includes(String(chat.id))) {
+        logEventTrace(config, 'update', 'ignored', 'Чат не входит в список разрешённых', { chatId: chat.id });
         return;
     }
 
     const services = { ss: SpreadsheetApp.getActiveSpreadsheet(), cache: CacheService.getScriptCache(), lock: LockService.getScriptLock() };
 
-    // =======================================================================
-    // COMPREHENSIVE FILTERING - All checks moved to the beginning for optimization
-    // =======================================================================
-    
-    // Task #7 & #4: Handle channel posts and whitelisted channels
+    const user = update.message?.from || update.callback_query?.from || update.chat_join_request?.from;
+
     if (update.message && update.message.sender_chat) {
         const senderId = String(update.message.sender_chat.id);
         if (senderId === String(config.target_channel_id) || config.whitelist_ids.includes(senderId)) {
             logToSheet('DEBUG', `Channel post from whitelisted sender ${senderId} in chat ${chat.id}. Ignoring.`);
-            return; // Ignore posts from target channel or whitelisted channels
+            logEventTrace(config, 'update', 'ignored', 'Сообщение от разрешённого канала пропущено', { chatId: chat.id, senderId });
+            return;
         }
     }
 
-    // Extract user from different update types for logging purposes only
-    const user = update.message?.from || 
-                 update.callback_query?.from || 
-                 update.chat_join_request?.from;
-    
-    // SELECTIVE FILTERING - only apply to MESSAGE and CALLBACK_QUERY events
     if (user && (update.message || update.callback_query)) {
-        // 1. Skip bots for MESSAGE events only (other events need bot processing)
         if (update.message && user.is_bot) {
             logToSheet('DEBUG', `Bot user ${user.id} in message event. Ignoring.`);
+            logEventTrace(config, 'update', 'ignored', 'Сообщение от бота пропущено', { chatId: chat.id, userId: user.id });
             return;
         }
 
-        // 2. Skip system accounts for MESSAGE events only
         if (update.message && IGNORED_USER_IDS.includes(String(user.id))) {
             logToSheet('DEBUG', `System account ${user.id} in message event. Ignoring.`);
+            logEventTrace(config, 'update', 'ignored', 'Системный пользователь пропущен', { chatId: chat.id, userId: user.id });
             return;
         }
 
-        // 3. Skip whitelisted users for MESSAGE events only
         if (update.message && config.whitelist_ids.includes(String(user.id))) {
             logToSheet('DEBUG', `Whitelisted user ${user.id} in message event. Ignoring.`);
+            logEventTrace(config, 'update', 'ignored', 'Пользователь из whitelist пропущен', { chatId: chat.id, userId: user.id });
             return;
         }
 
-        // 4. Skip private messages to bot (for message events only)
         if (update.message && String(chat.id) === String(user.id)) {
             logToSheet('DEBUG', `Private message from user ${user.id} to bot. Ignoring.`);
+            logEventTrace(config, 'update', 'ignored', 'Личное сообщение боту пропущено', { chatId: chat.id, userId: user.id });
             return;
         }
 
-        // 5. Skip admins for MESSAGE events only (other events need admin processing for permissions)
         if (update.message) {
             logToSheet('DEBUG', `[handleUpdate] Checking admin status for user ${user.id} in chat ${chat.id}`);
             logToTestSheet('handleUpdate DEBUG', '🔍 DEBUG', `Checking admin status: user ${user.id}, chat ${chat.id}`, '');
@@ -299,27 +353,35 @@ function handleUpdate(update) {
             if (userIsAdmin) {
                 logToSheet('DEBUG', `[handleUpdate] Admin ${user.id} in message event. Ignoring.`);
                 logToTestSheet('handleUpdate DEBUG', '🔍 DEBUG', `SKIPPING: Admin ${user.id} in message event`, '');
+                logEventTrace(config, 'update', 'ignored', 'Сообщение администратора пропущено', { chatId: chat.id, userId: user.id });
                 return;
             }
         }
     }
 
-    // =======================================================================
-    // EVENT DISPATCHER - Only process events that passed all filters
-    // =======================================================================
-    
+    logEventTrace(config, 'update', 'processed', 'Обновление прошло фильтры', {
+        chatId: chat.id,
+        userId: user?.id,
+        chat_member: !!update.chat_member,
+        chat_join_request: !!update.chat_join_request,
+        message: !!update.message,
+        callback_query: !!update.callback_query
+    });
+
     if (user) {
         logToSheet('INFO', `Processing event for user ${user.id} in chat ${chat.id} after all filters passed.`);
     }
-    
-    // DEBUG: Log what event type we're processing
+
     logToSheet('DEBUG', `Event dispatcher: chat_member=${!!update.chat_member}, chat_join_request=${!!update.chat_join_request}, message=${!!update.message}, callback_query=${!!update.callback_query}`);
-    
+    logEventTrace(config, 'update', 'dispatch', 'Передача обновления специализированному обработчику', {
+        chatId: chat.id,
+        userId: user?.id,
+        types: Object.keys(update || {})
+    });
+
     if (update.chat_member) {
-        logToSheet('DEBUG', `Calling handleNewChatMember with: ${JSON.stringify(update.chat_member)}`);
         handleNewChatMember(update.chat_member, services, config);
     } else if (update.chat_join_request) {
-        logToSheet('DEBUG', `Calling handleChatJoinRequest with: ${JSON.stringify(update.chat_join_request)}`);
         handleChatJoinRequest(update.chat_join_request, services, config);
     } else if (update.message) {
         handleMessage(update.message, services, config);
@@ -327,6 +389,7 @@ function handleUpdate(update) {
         handleCallbackQuery(update.callback_query, services, config);
     } else {
         logToSheet('WARN', `Unknown event type in update: ${Object.keys(update).join(', ')}`);
+        logEventTrace(config, 'update', 'ignored', 'Тип обновления не распознан', { keys: Object.keys(update || {}) });
     }
 }
 
@@ -343,11 +406,20 @@ function handleChatJoinRequest(joinRequest, services, config) {
     const user = joinRequest.from;
     
     logToSheet('INFO', `Join request from ${user.first_name || 'User'} (${user.id}) for chat ${chat.id}.`);
+    logEventTrace(config, 'chat_join_request', 'received', 'Получена заявка на вступление', {
+        chatId: chat.id,
+        userId: user.id
+    });
     
     // Skip bots and system accounts
     if (user.is_bot || IGNORED_USER_IDS.includes(String(user.id))) {
         logToSheet('INFO', `Join request from bot/system account ${user.id}. Declining.`);
         sendTelegram('declineChatJoinRequest', { chat_id: chat.id, user_id: user.id });
+        logEventTrace(config, 'chat_join_request', 'declined', 'Отказано боту или системному аккаунту', {
+            chatId: chat.id,
+            userId: user.id,
+            reason: 'bot_or_system_account'
+        });
         return;
     }
     
@@ -356,8 +428,17 @@ function handleChatJoinRequest(joinRequest, services, config) {
     
     if (approveResult?.ok) {
         logToSheet('INFO', `Join request approved for ${user.id} in chat ${chat.id}.`);
+        logEventTrace(config, 'chat_join_request', 'approved', 'Заявка успешно одобрена', {
+            chatId: chat.id,
+            userId: user.id
+        });
     } else {
         logToSheet('ERROR', `Failed to approve join request for ${user.id} in chat ${chat.id}: ${approveResult?.description}`);
+        logEventTrace(config, 'chat_join_request', 'error', 'Не удалось одобрить заявку', {
+            chatId: chat.id,
+            userId: user.id,
+            description: approveResult?.description || 'unknown_error'
+        });
     }
 }
 
@@ -370,26 +451,58 @@ function handleNewChatMember(chatMember, services, config) {
 
     logToSheet('DEBUG', `[handleNewChatMember] ChatMember Event: chat_id=${chat.id}, user_id=${user.id}, from_id=${fromUser?.id}, old_status=${oldStatus}, new_status=${newStatus}`);
     logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Processing chat_member event: user ${user.id}, from ${fromUser?.id}, status ${oldStatus} -> ${newStatus} in chat ${chat.id}`, '');
-
-    // Skip if event is about the bot itself
-    const botId = getBotId();
-    if (botId && user.id === botId) {
-        logToSheet('INFO', `[handleNewChatMember] Bot join event in chat ${chat.id}. No action needed.`);
-        logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Bot itself ${user.id}`, '');
-        return;
-    }
+    logEventTrace(config, 'chat_member', 'received', 'Получено событие изменения участника', {
+        chatId: chat.id,
+        userId: user.id,
+        fromId: fromUser?.id,
+        oldStatus,
+        newStatus
+    });
 
     // Skip negative IDs (channels acting as users)
     if (user.id < 0) {
         logToSheet('INFO', `[handleNewChatMember] Channel as user event (ID: ${user.id}) in chat ${chat.id}. Skipping.`);
         logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Negative ID (channel) ${user.id}`, '');
+        logEventTrace(config, 'chat_member', 'ignored', 'Событие от канала пропущено', {
+            chatId: chat.id,
+            userId: user.id,
+            reason: 'channel_as_user'
+        });
+        return;
+    }
+
+    // Skip if event is about the bot itself or other bots
+    if (user.is_bot) {
+        const botId = getBotId();
+        if (botId && user.id === botId) {
+            logToSheet('INFO', `[handleNewChatMember] Bot join event in chat ${chat.id}. No action needed.`);
+            logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Bot itself ${user.id}`, '');
+            logEventTrace(config, 'chat_member', 'ignored', 'Событие о самом боте, пропустить', {
+                chatId: chat.id,
+                userId: user.id,
+                reason: 'bot_self'
+            });
+        } else {
+            logToSheet('INFO', `[handleNewChatMember] External bot ${user.id} in chat ${chat.id}. Skipping.`);
+            logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Other bot ${user.id}`, '');
+            logEventTrace(config, 'chat_member', 'ignored', 'Событие о внешнем боте, пропустить', {
+                chatId: chat.id,
+                userId: user.id,
+                reason: 'external_bot'
+            });
+        }
         return;
     }
 
     // Skip system accounts and other bots
-    if (user.is_bot || IGNORED_USER_IDS.includes(String(user.id))) {
-        logToSheet('INFO', `[handleNewChatMember] Bot or system account ${user.id} in chat ${chat.id}. Skipping member processing.`);
-        logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Bot/system account ${user.id}`, '');
+    if (IGNORED_USER_IDS.includes(String(user.id))) {
+        logToSheet('INFO', `[handleNewChatMember] System account ${user.id} in chat ${chat.id}. Skipping member processing.`);
+        logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: System account ${user.id}`, '');
+        logEventTrace(config, 'chat_member', 'ignored', 'Системный аккаунт пропущен', {
+            chatId: chat.id,
+            userId: user.id,
+            reason: 'system_account'
+        });
         return;
     }
 
@@ -404,13 +517,12 @@ function handleNewChatMember(chatMember, services, config) {
     // Define what constitutes a "real join" requiring CAPTCHA
     // Real join = user-initiated AND transitioning to 'member' from a non-member state
     const isRealJoin = isInitiatedByUser && (
-        // Standard join: left/kicked -> member
-        ((oldStatus === 'left' || oldStatus === 'kicked') && newStatus === 'member') ||
+        // Standard join: left/kicked/restricted -> member
+        ((oldStatus === 'left' || oldStatus === 'kicked' || oldStatus === 'restricted') && newStatus === 'member') ||
         // First time join: no old status -> member  
         (!oldStatus && newStatus === 'member')
     );
     
-    // IMPORTANT: restricted -> member should NOT trigger CAPTCHA (that's CAPTCHA passing)
     // Admin actions should NOT trigger CAPTCHA (isInitiatedByUser = false)
 
     logToSheet('DEBUG', `[handleNewChatMember] Real join check: isRealJoin=${isRealJoin}, oldStatus=${oldStatus}, newStatus=${newStatus}`);
@@ -419,6 +531,14 @@ function handleNewChatMember(chatMember, services, config) {
     if (!isRealJoin) {
         logToSheet('DEBUG', `[handleNewChatMember] Non-join event for user ${user.id} in chat ${chat.id}: ${oldStatus} -> ${newStatus}. Skipping.`);
         logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Non-join event for user ${user.id}: ${oldStatus} -> ${newStatus}`, '');
+        logEventTrace(config, 'chat_member', 'ignored', 'Событие не является новым вступлением', {
+            chatId: chat.id,
+            userId: user.id,
+            reason: 'not_real_join',
+            oldStatus,
+            newStatus,
+            initiatedByUser: isInitiatedByUser
+        });
         return;
     }
 
@@ -430,17 +550,31 @@ function handleNewChatMember(chatMember, services, config) {
     if (userIsAdmin) {
         logToSheet('INFO', `[handleNewChatMember] Admin ${user.id} joined chat ${chat.id}. No CAPTCHA needed.`);
         logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `SKIPPING: Admin user ${user.id} joined chat ${chat.id}`, '');
+        logEventTrace(config, 'chat_member', 'ignored', 'Администратор, CAPTCHA не требуется', {
+            chatId: chat.id,
+            userId: user.id
+        });
         return;
     }
 
     logToSheet('INFO', `[handleNewChatMember] Real user join detected: ${user.first_name || 'User'} (${user.id}) in chat ${chat.id}.`);
     logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `PROCESSING: Real user join detected for user ${user.id}`, '');
+    logEventTrace(config, 'chat_member', 'processing', 'Начата выдача CAPTCHA для нового пользователя', {
+        chatId: chat.id,
+        userId: user.id
+    });
 
     // Check if bot has necessary permissions (only for real joins)
     const botInfo = sendTelegram('getChatMember', { chat_id: chat.id, user_id: getBotId() });
     if (!botInfo?.ok || !botInfo.result?.can_restrict_members || !botInfo.result?.can_delete_messages) {
         logToSheet('WARN', `[handleNewChatMember] Bot lacks required permissions in chat ${chat.id}. Cannot handle member events properly.`);
         logToTestSheet('handleNewChatMember DEBUG', '⚠️ WARN', `Bot lacks permissions in chat ${chat.id}`, '');
+        logEventTrace(config, 'chat_member', 'error', 'У бота нет прав для обработки новых участников', {
+            chatId: chat.id,
+            userId: user.id,
+            canRestrict: botInfo?.result?.can_restrict_members,
+            canDelete: botInfo?.result?.can_delete_messages
+        });
         return;
     }
 
@@ -454,8 +588,19 @@ function handleNewChatMember(chatMember, services, config) {
     if (!restrictResult?.ok) {
         logToSheet('ERROR', `[handleNewChatMember] Failed to restrict user ${user.id} in chat ${chat.id}: ${restrictResult?.description}`);
         logToTestSheet('handleNewChatMember DEBUG', '❌ ERROR', `Failed to restrict user ${user.id}: ${restrictResult?.description}`, '');
+        logEventTrace(config, 'chat_member', 'error', 'Не удалось временно ограничить пользователя перед CAPTCHA', {
+            chatId: chat.id,
+            userId: user.id,
+            description: restrictResult?.description || 'unknown_error'
+        });
         return;
     }
+
+    logEventTrace(config, 'chat_member', 'restricted', 'Пользователь временно ограничен до прохождения CAPTCHA', {
+        chatId: chat.id,
+        userId: user.id,
+        muteUntil
+    });
 
     const text = config.texts.captcha_text.replace('{user_mention}', getMention(user));
     const keyboard = { 
@@ -478,9 +623,20 @@ function handleNewChatMember(chatMember, services, config) {
         logToSheet('INFO', `[handleNewChatMember] CAPTCHA sent to ${user.id} in chat ${chat.id}, message_id: ${sentMessage.result.message_id}`);
         logToTestSheet('handleNewChatMember DEBUG', '✅ SUCCESS', `CAPTCHA sent to user ${user.id}, message ${sentMessage.result.message_id}`, '');
         addMessageToCleaner(chat.id, sentMessage.result.message_id, config.captcha_message_timeout_sec, services);
+        logEventTrace(config, 'chat_member', 'captcha_sent', 'Отправлено сообщение с CAPTCHA', {
+            chatId: chat.id,
+            userId: user.id,
+            messageId: sentMessage.result.message_id,
+            muteUntil
+        });
     } else {
         logToSheet('ERROR', `[handleNewChatMember] Failed to send CAPTCHA to user ${user.id} in chat ${chat.id}: ${sentMessage?.description}`);
         logToTestSheet('handleNewChatMember DEBUG', '❌ ERROR', `Failed to send CAPTCHA to user ${user.id}: ${sentMessage?.description}`, '');
+        logEventTrace(config, 'chat_member', 'error', 'Не удалось отправить сообщение CAPTCHA', {
+            chatId: chat.id,
+            userId: user.id,
+            description: sentMessage?.description || 'unknown_error'
+        });
     }
 }
 
@@ -494,31 +650,71 @@ function handleCallbackQuery(callbackQuery, services, config) {
     const chat = callbackQuery.message.chat;
     const messageId = callbackQuery.message.message_id;
     
+    logToSheet('DEBUG', `[handleCallbackQuery] data=${data}, user_id=${user.id}, chat_id=${chat.id}`);
+    logEventTrace(config, 'callback_query', 'received', 'Получен callback-запрос от пользователя', {
+        chatId: chat.id,
+        userId: user.id,
+        data
+    });
+    
     // Handle CAPTCHA buttons
     if (data.startsWith('captcha_')) {
+        logEventTrace(config, 'callback_query', 'processing', 'Обработка кнопки CAPTCHA', {
+            chatId: chat.id,
+            userId: user.id,
+            data
+        });
         const expectedUserId = data.split('_')[1];
         if (String(user.id) !== expectedUserId) {
             sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Эта кнопка не для вас!', show_alert: true });
+            logEventTrace(config, 'callback_query', 'ignored', 'Пользователь попытался нажать чужую CAPTCHA', {
+                chatId: chat.id,
+                userId: user.id,
+                expectedUserId
+            });
             return;
         }
 
         unmuteUser(chat.id, user.id);
-        deleteMessage(chat.id, messageId);
+        const deleteResult = deleteMessage(chat.id, messageId);
         sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '✅ Проверка пройдена!' });
 
         const welcomeMsg = `${getMention(user)}, добро пожаловать!`;
         const successMsg = sendTelegram('sendMessage', { chat_id: chat.id, text: welcomeMsg, parse_mode: 'HTML' });
         if (successMsg?.ok) {
             addMessageToCleaner(chat.id, successMsg.result.message_id, 15, services);
+            logEventTrace(config, 'callback_query', 'captcha_completed', 'Пользователь прошёл CAPTCHA успешно', {
+                chatId: chat.id,
+                userId: user.id,
+                deleteOk: deleteResult?.ok,
+                welcomeMessageId: successMsg.result.message_id
+            });
+        }
+        else {
+            logEventTrace(config, 'callback_query', 'error', 'Не удалось отправить приветственное сообщение после CAPTCHA', {
+                chatId: chat.id,
+                userId: user.id,
+                description: successMsg?.description || 'unknown_error'
+            });
         }
         return;
     }
     
     // Handle subscription check buttons
     if (data.startsWith('check_sub_')) {
+        logEventTrace(config, 'callback_query', 'processing', 'Обработка кнопки проверки подписки', {
+            chatId: chat.id,
+            userId: user.id,
+            data
+        });
         const expectedUserId = data.split('_')[2];
         if (String(user.id) !== expectedUserId) {
             sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Эта кнопка не для вас!', show_alert: true });
+            logEventTrace(config, 'callback_query', 'ignored', 'Пользователь попытался нажать чужую кнопку проверки подписки', {
+                chatId: chat.id,
+                userId: user.id,
+                expectedUserId
+            });
             return;
         }
         
@@ -530,7 +726,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
         if (isMember) {
             // User is subscribed - success
             services.cache.remove(`violations_${user.id}`);
-            deleteMessage(chat.id, messageId);
+            const deleteResult = deleteMessage(chat.id, messageId);
             
             const successMsg = `🎉 ${getMention(user)}, вы успешно подписались и теперь можете писать сообщения!`;
             const sentMsg = sendTelegram('sendMessage', { 
@@ -542,6 +738,12 @@ function handleCallbackQuery(callbackQuery, services, config) {
             if (sentMsg?.ok) {
                 addMessageToCleaner(chat.id, sentMsg.result.message_id, 3, services);
             }
+            logEventTrace(config, 'callback_query', 'subscription_confirmed', 'Пользователь подтвердил подписку через кнопку', {
+                chatId: chat.id,
+                userId: user.id,
+                deleteOk: deleteResult?.ok,
+                confirmationMessageId: sentMsg?.result?.message_id
+            });
         } else {
             // User is still not subscribed
             let alertText = `🚫 ${getMention(user).replace(/<[^>]*>/g, '')}, вы все еще не подписаны на канал.\n\nПодпишитесь и попробуйте снова.`;
@@ -566,7 +768,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
                     ]
                 };
                 
-                sendTelegram('editMessageText', {
+                const editResult = sendTelegram('editMessageText', {
                     chat_id: chat.id,
                     message_id: messageId,
                     text: updatedText,
@@ -576,12 +778,29 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 });
                 
                 addMessageToCleaner(chat.id, messageId, 15, services);
+                logEventTrace(config, 'callback_query', 'subscription_pending', 'Пользователь ещё не подписан, сообщение обновлено', {
+                    chatId: chat.id,
+                    userId: user.id,
+                    editOk: editResult?.ok,
+                    channelTitle
+                });
             }
             
             sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: alertText, show_alert: true, cache_time: 5 });
         }
+        logEventTrace(config, 'callback_query', 'completed', 'Обработка кнопки проверки подписки завершена', {
+            chatId: chat.id,
+            userId: user.id,
+            result: isMember ? 'subscribed' : 'not_subscribed'
+        });
         return;
     }
+
+    logEventTrace(config, 'callback_query', 'ignored', 'Неизвестный callback_data, действие не выполнено', {
+        chatId: chat.id,
+        userId: user.id,
+        data
+    });
 }
 
 /**
@@ -594,6 +813,12 @@ function handleMessage(message, services, config) {
     
     logToSheet('DEBUG', `[handleMessage] Processing message from user ${user.id} in chat ${chat.id}`);
     logToTestSheet('handleMessage DEBUG', '🔍 DEBUG', `Processing message: user ${user.id}, chat ${chat.id}`, '');
+    logEventTrace(config, 'message', 'received', 'Получено сообщение от пользователя', {
+        chatId: chat.id,
+        userId: user.id,
+        messageId: message.message_id,
+        textLength: message.text ? message.text.length : 0
+    });
     
     // Check subscription status
     const isMember = isUserSubscribed(user.id, config.target_channel_id);
@@ -602,13 +827,25 @@ function handleMessage(message, services, config) {
     if (isMember) {
         services.cache.remove(`violations_${user.id}`);
         logToSheet('DEBUG', `[handleMessage] User ${user.id} is subscribed, allowing message`);
+        logEventTrace(config, 'message', 'allowed', 'Пользователь подписан, сообщение разрешено', {
+            chatId: chat.id,
+            userId: user.id
+        });
         return;
     }
 
     // If not a member, delete message and handle violation
-    deleteMessage(chat.id, message.message_id);
+    const deleteResult = deleteMessage(chat.id, message.message_id);
     let violationCount = Number(services.cache.get(`violations_${user.id}`) || 0) + 1;
     services.cache.put(`violations_${user.id}`, violationCount, 21600); // Cache violations for 6 hours
+    logEventTrace(config, 'message', 'violation_recorded', 'Сообщение удалено: пользователь не подписан', {
+        chatId: chat.id,
+        userId: user.id,
+        messageId: message.message_id,
+        deleteOk: deleteResult?.ok,
+        violationCount,
+        violationLimit: config.violation_limit
+    });
 
     if (violationCount < config.violation_limit) {
         if (violationCount === 1) { // Send warning only on the first violation
@@ -649,11 +886,34 @@ function handleMessage(message, services, config) {
             });
             if (sentWarning?.ok) {
                 addMessageToCleaner(chat.id, sentWarning.result.message_id, config.warning_message_timeout_sec, services);
+                logEventTrace(config, 'message', 'warning_sent', 'Отправлено предупреждение о необходимости подписки', {
+                    chatId: chat.id,
+                    userId: user.id,
+                    messageId: sentWarning.result.message_id,
+                    hasChannelLink: !!keyboard
+                });
+            } else {
+                logEventTrace(config, 'message', 'error', 'Не удалось отправить предупреждение о подписке', {
+                    chatId: chat.id,
+                    userId: user.id,
+                    description: sentWarning?.description || 'unknown_error'
+                });
             }
+        } else {
+            logEventTrace(config, 'message', 'violation_notified', 'Повторное нарушение зафиксировано, предупреждение не отправлялось', {
+                chatId: chat.id,
+                userId: user.id,
+                violationCount
+            });
         }
     } else {
         applyProgressiveMute(chat.id, user, services, config);
         services.cache.remove(`violations_${user.id}`); // Reset counter after muting
+        logEventTrace(config, 'message', 'mute_applied', 'Порог нарушений достигнут, пользователь временно ограничен', {
+            chatId: chat.id,
+            userId: user.id,
+            violationLimit: config.violation_limit
+        });
     }
 }
 
@@ -667,7 +927,15 @@ function handleMessage(message, services, config) {
 function getCachedConfig() {
     const cache = CacheService.getScriptCache();
     const cached = cache.get('config');
-    if (cached) { try { return JSON.parse(cached); } catch(e) { /* continue to load */ } }
+    if (cached) {
+        try {
+            const parsedConfig = JSON.parse(cached);
+            setLoggingContext(parsedConfig);
+            return parsedConfig;
+        } catch(e) {
+            /* continue to load */
+        }
+    }
 
     let config = JSON.parse(JSON.stringify(DEFAULT_CONFIG)); // Start with defaults
     try {
@@ -710,6 +978,7 @@ function getCachedConfig() {
     } catch (e) {
         logToSheet("ERROR", `Failed to load config from sheet: ${e.message}. Using defaults.`);
     }
+    setLoggingContext(config);
     return config;
 }
 
@@ -888,6 +1157,43 @@ function restrictUser(chatId, userId, canSendMessages, untilDate) {
 function unmuteUser(chatId, userId) {
     const permissions = { 'can_send_messages': true, 'can_send_media_messages': true, 'can_send_other_messages': true, 'can_add_web_page_previews': true };
     return sendTelegram('restrictChatMember', { chat_id: chatId, user_id: userId, permissions: JSON.stringify(permissions) });
+}
+
+function logEventTrace(config, event, action, details, payload, force) {
+  const configFlag = typeof config === 'boolean' ? config : config?.extended_logging_enabled;
+  if (!force && !configFlag) return;
+
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Events');
+    if (!sheet) return;
+
+    if (sheet.getLastRow() > 2000) {
+      sheet.deleteRows(2, sheet.getLastRow() - 1999);
+    }
+
+    let payloadText = '';
+    if (payload !== undefined && payload !== null) {
+      if (typeof payload === 'string') {
+        payloadText = payload;
+      } else {
+        try {
+          payloadText = JSON.stringify(payload);
+        } catch (jsonError) {
+          payloadText = `[[Unserializable payload: ${jsonError.message}]]`;
+        }
+      }
+    }
+
+    sheet.appendRow([
+      new Date(),
+      String(event || ''),
+      String(action || ''),
+      String(details || '').slice(0, 2000),
+      String(payloadText || '').slice(0, 5000)
+    ]);
+  } catch (e) {
+    logToSheet('ERROR', `Failed to write extended log: ${e.message}`);
+  }
 }
 
 function logToSheet(level, message) {
