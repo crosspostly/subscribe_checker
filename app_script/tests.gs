@@ -245,6 +245,9 @@ function getMockServicesAndData(originalServices) {
   this.PropertiesService = mockPropertiesService;
   this.SpreadsheetApp = mockSpreadsheetApp;
   this.LockService = mockLockService;
+  
+  // CRITICAL: Set TEST_MODE to avoid logging during tests
+  this.TEST_MODE = true;
 
   return {
     urlFetchLog,
@@ -257,6 +260,9 @@ function getMockServicesAndData(originalServices) {
       this.PropertiesService = originals.PropertiesService;
       this.SpreadsheetApp = originals.SpreadsheetApp;
       this.LockService = originals.LockService;
+      
+      // CRITICAL: Reset TEST_MODE after tests
+      this.TEST_MODE = false;
     }
   };
 }
@@ -443,7 +449,7 @@ function test_handleNewChatMember_detectsRealJoins(mocks) {
     const scenarios = [
         { old: 'left', new: 'member', shouldProcess: true },
         { old: 'kicked', new: 'member', shouldProcess: true },
-        { old: 'restricted', new: 'member', shouldProcess: true },
+        { old: 'restricted', new: 'member', shouldProcess: false }, // FIXED: restricted->member means user passed CAPTCHA, not new join!
         { old: null, new: 'member', shouldProcess: true },
         { old: 'member', new: 'left', shouldProcess: false },
         { old: 'member', new: 'restricted', shouldProcess: false }
@@ -456,7 +462,8 @@ function test_handleNewChatMember_detectsRealJoins(mocks) {
         const update = { chat_member: { 
             chat: { id: -100999 }, 
             old_chat_member: scenario.old ? { status: scenario.old } : null, 
-            new_chat_member: { status: scenario.new, user: { id: 456 + index, is_bot: false } } 
+            new_chat_member: { status: scenario.new, user: { id: 456 + index, is_bot: false } },
+            from: { id: 456 + index } // User initiated the join themselves
         } };
         
         logTestDebug('test_handleNewChatMember_detectsRealJoins', `Scenario ${index}: Testing ${scenario.old} -> ${scenario.new} (should process: ${scenario.shouldProcess})`);
