@@ -430,6 +430,18 @@ function handleUpdate(update) {
     logEventTrace(config, 'update', 'received', 'Получено новое обновление от Telegram', update);
 
     if (!config.bot_enabled) {
+        // Даже если бот выключен, для администратора в ЛС логируем факт доставки вебхука
+        const chatTmp = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat || update.chat_join_request?.chat;
+        const userTmp = update.message?.from || update.callback_query?.from || update.chat_join_request?.from;
+        const adminIdStr = String(config.admin_id || '').trim();
+        if (chatTmp && userTmp && String(chatTmp.id) === String(userTmp.id) && adminIdStr && String(userTmp.id) === adminIdStr) {
+            logToSheet('SUCCESS', `🌐 Webhook OK (бот выключен): получено ЛС от администратора ${userTmp.id}`);
+            logEventTrace(config, 'webhook', 'admin_dm', 'Admin DM received while bot is disabled - webhook alive', {
+                chatId: chatTmp.id,
+                userId: userTmp.id,
+                keys: Object.keys(update || {})
+            }, true);
+        }
         logEventTrace(config, 'update', 'ignored', 'Бот отключен, обновление пропущено', { reason: 'bot_disabled' });
         return;
     }
@@ -479,11 +491,22 @@ function handleUpdate(update) {
             return;
         }
 
-        if (update.message && String(chat.id) === String(user.id)) {
+    if (update.message && String(chat.id) === String(user.id)) {
+        // ЛС с администратором — логируем отдельным событием, подтверждая работу вебхука
+        const adminIdStr = String(config.admin_id || '').trim();
+        if (adminIdStr && String(user.id) === adminIdStr) {
+            logToSheet('SUCCESS', `🌐 Webhook OK: получено личное сообщение от администратора ${user.id}. Ключи обновления: ${Object.keys(update || {}).join(', ')}`);
+            logEventTrace(config, 'webhook', 'admin_dm', 'Admin DM received - webhook alive', {
+                chatId: chat.id,
+                userId: user.id,
+                keys: Object.keys(update || {})
+            }, true);
+        } else {
             logToSheet('DEBUG', `Private message from user ${user.id} to bot. Ignoring.`);
             logEventTrace(config, 'update', 'ignored', 'Личное сообщение боту пропущено', { chatId: chat.id, userId: user.id });
-            return;
         }
+        return;
+    }
 
         if (update.message) {
             logToSheet('DEBUG', `[handleUpdate] Checking admin status for user ${user.id} in chat ${chat.id}`);
@@ -1405,8 +1428,11 @@ function logEventTrace(config, event, action, details, payload, force) {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Events');
     if (!sheet) return;
 
-    if (sheet.getLastRow() > 2000) {
-      sheet.deleteRows(2, sheet.getLastRow() - 1999);
+    // Очистка Events при превышении 10 000 строк
+    const maxRows = 10000;
+    const rows = sheet.getLastRow();
+    if (rows > maxRows) {
+      sheet.deleteRows(2, rows - (maxRows - 1));
     }
 
     let payloadText = '';
@@ -1438,7 +1464,11 @@ function logToSheet(level, message) {
   try {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Logs');
     if (sheet) {
-        if (sheet.getLastRow() > 5000) { sheet.deleteRows(2, sheet.getLastRow() - 4999); }
+        // Автоматическая очистка логов для предотвращения переполнения
+        // Google Sheets лимиты: до ~10 млн ячеек на таблицу; для безопасности режем лист логов до 10 000 строк
+        const maxRows = 10000;
+        const currentRows = sheet.getLastRow();
+        if (currentRows > maxRows) { sheet.deleteRows(2, currentRows - (maxRows - 1)); }
         sheet.appendRow([new Date(), level, String(message).slice(0, 50000)]);
     }
   } catch (e) { /* Failsafe, do nothing */ }
