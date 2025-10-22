@@ -30,10 +30,10 @@ const DEFAULT_CONFIG = {
   texts: {
     captcha_text: "{user_mention}, добро пожаловать! Чтобы писать в чат, подтвердите, что вы не робот.",
     sub_warning_text: "{user_mention}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:\n\n  • {channel_link}\n\nПосле подписки нажмите кнопку ниже.",
-    sub_warning_text_no_link: "{user_mention}, чтобы отправлять сообщения в этот чат, вы должны быть подписаны на наш канал.",
+    sub_warning_text_no_link: "{user_mention}, не удалось подтвердить вашу подписку. Убедитесь, что подписаны на нужные каналы. Кнопка ниже.",
     sub_success_text: "🎉 {user_mention}, вы успешно подписались и теперь можете писать сообщения!",
-    sub_fail_text: "🚫 {user_mention}, вы все еще не подписаны на канал.\n\nПодпишитесь и попробуйте снова.",
-    sub_mute_text: "{user_mention} был заглушен на {duration} минут за отказ от подписки на канал."
+    sub_fail_text: "🚫 {user_mention}, вы все еще не подписаны на:\n\nПодпишитесь и попробуйте снова.",
+    sub_mute_text: "{user_mention}, вы были временно ограничены в отправке сообщений на {duration} минут, так как не подписались на обязательные каналы."
   }
 };
 
@@ -82,7 +82,15 @@ function onOpen() {
 function userEnableBot() { enableBot(true); }
 function userDisableBot() { disableBot(true); }
 function userClearCache() { clearCache(true); }
-function userToggleExtendedLogging() { toggleExtendedLogging(true); }
+function userToggleExtendedLogging() {
+  try {
+    toggleExtendedLogging(true);
+  } catch (e) {
+    logToSheet('ERROR', `userToggleExtendedLogging error: ${e.message}`);
+    try { SpreadsheetApp.getUi().alert(`Ошибка при переключении расширенных логов: ${e.message}`); } catch (_) {}
+    return false;
+  }
+}
 function userEnableDeveloperMode() { enableDeveloperMode(true); }
 function userDisableDeveloperMode() { disableDeveloperMode(true); }
 
