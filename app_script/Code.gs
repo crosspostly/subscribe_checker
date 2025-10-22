@@ -790,7 +790,7 @@ function handleNewChatMember(chatMember, services, config) {
     const text = config.texts.captcha_text.replace('{user_mention}', getMention(user));
     const keyboard = { 
         inline_keyboard: [[{ 
-            text: "✅ Я не робот", 
+            text: "Я не робот", 
             callback_data: `captcha_${user.id}` 
         }]] 
     };
@@ -980,8 +980,8 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 
                 const keyboard = {
                     inline_keyboard: [
-                        [{ text: `📱 ${channelTitle.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
-                        [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }]
+                        [{ text: `Канал`, url: config.target_channel_url }],
+                        [{ text: "Проверить", callback_data: `check_sub_${user.id}` }]
                     ]
                 };
                 
@@ -1010,7 +1010,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 // Нет URL — оставляем кнопку "Я подписался" для повторной проверки
                 const updatedText = (config.texts.sub_fail_text || DEFAULT_CONFIG.texts.sub_fail_text)
                   .replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
-                const keyboard = { inline_keyboard: [ [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }] ] };
+                const keyboard = { inline_keyboard: [ [{ text: "Проверить", callback_data: `check_sub_${user.id}` }] ] };
                 const editResult = sendTelegram('editMessageText', {
                     chat_id: chat.id,
                     message_id: messageId,
