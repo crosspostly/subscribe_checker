@@ -18,7 +18,7 @@ const DEFAULT_CONFIG = {
   developer_mode_enabled: false,
   target_channel_id: "-1001168879742", // Default: customer-provided channel ID
   target_channel_url: "https://t.me/+fSmCfuEEzPVlYTky", // Default: customer-provided invite link
-  authorized_chat_ids: "-1001491334227", // Default: customer-provided chat ID
+  authorized_chat_ids: "-1001491334227\n-1001568712129", // Default: customer-provided chat IDs (newline-separated)
   admin_id: "183761194", // Default: customer-provided admin ID
   captcha_mute_duration_min: 30,     // 30 minutes as requested
   captcha_message_timeout_sec: 30,   // 30 seconds as requested
@@ -1288,7 +1288,8 @@ function applyProgressiveMute(chatId, user, services, config) {
             .replace('{duration}', muteDurationMin);
         const sentMuteMsg = sendTelegram('sendMessage', { chat_id: chatId, text: text, parse_mode: 'HTML' });
         if (sentMuteMsg?.ok) {
-            addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 45, services);
+            // Удаляем сообщение о муте через 10 секунд, как в Python-версии
+            addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 10, services);
         }
     } finally {
         lock.releaseLock();
