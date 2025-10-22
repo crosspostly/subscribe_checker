@@ -29,7 +29,7 @@ const DEFAULT_CONFIG = {
   mute_level_3_duration_min: 10080,  // 7 days as requested (10080 min)
   texts: {
     captcha_text: "{user_mention}, добро пожаловать! Чтобы писать в чат, подтвердите, что вы не робот.",
-    sub_warning_text: "{user_mention}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:\n\n  • {channel_link}\n\nПосле подписки нажмите кнопку ниже.",
+    sub_warning_text: "{user_mention}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:\n\n • {channel_link}\n\nПосле подписки нажмите кнопку ниже.",
     sub_warning_text_no_link: "{user_mention}, чтобы отправлять сообщения в этот чат, вы должны быть подписаны на наш канал.",
     sub_success_text: "🎉 {user_mention}, вы успешно подписались и теперь можете писать сообщения!",
     sub_fail_text: "🚫 {user_mention}, не удалось подтвердить вашу подписку. Убедитесь, что подписаны на все каналы, и попробуйте снова.",
@@ -296,9 +296,10 @@ function _createSheets() {
         ["key", "value"],
         ["captcha_text", DEFAULT_CONFIG.texts.captcha_text],
         ["sub_warning_text", DEFAULT_CONFIG.texts.sub_warning_text],
+        ["sub_warning_text_no_link", DEFAULT_CONFIG.texts.sub_warning_text_no_link],
         ["sub_success_text", DEFAULT_CONFIG.texts.sub_success_text],
         ["sub_fail_text", DEFAULT_CONFIG.texts.sub_fail_text],
-        ["sub_mute_text", "{user_mention} был заглушен на {duration} минут за отказ от подписки на канал."]
+        ["sub_mute_text", DEFAULT_CONFIG.texts.sub_mute_text]
     ],
     "Users": [["user_id", "mute_level", "first_violation_date"]],
     "Logs": [["Timestamp", "Level", "Message"]],
@@ -837,7 +838,10 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 }
                 
                 const channelLink = `<a href="${config.target_channel_url}">${channelTitle.replace(/[<>]/g, '')}</a>`;
-                const updatedText = `${getMention(user)}, вы все еще не подписаны на:\n\n  • ${channelLink}\n\nПодпишитесь и попробуйте снова.`;
+                const template = (config.texts.sub_warning_text || DEFAULT_CONFIG.texts.sub_warning_text);
+                const updatedText = template
+                  .replace('{user_mention}', getMention(user))
+                  .replace('{channel_link}', channelLink);
                 
                 const keyboard = {
                     inline_keyboard: [
@@ -962,7 +966,10 @@ function handleMessage(message, services, config) {
                 const channelInfo = sendTelegram('getChat', { chat_id: config.target_channel_id });
                 const channelTitle = channelInfo?.result?.title || config.target_channel_id;
                 const channelLink = `<a href="${config.target_channel_url}">${channelTitle.replace(/[<>]/g, '')}</a>`;
-                text = `${getMention(user)}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:\n\n  • ${channelLink}\n\nПосле подписки нажмите кнопку ниже.`;
+                const template = (config.texts.sub_warning_text || DEFAULT_CONFIG.texts.sub_warning_text);
+                text = template
+                  .replace('{user_mention}', getMention(user))
+                  .replace('{channel_link}', channelLink);
                 keyboard = {
                     inline_keyboard: [
                         [{ text: `📱 ${channelTitle.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
