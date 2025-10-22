@@ -32,8 +32,8 @@ const DEFAULT_CONFIG = {
     sub_warning_text: "{user_mention}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:\n\n  • {channel_link}\n\nПосле подписки нажмите кнопку ниже.",
     sub_warning_text_no_link: "{user_mention}, чтобы отправлять сообщения в этот чат, вы должны быть подписаны на наш канал.",
     sub_success_text: "🎉 {user_mention}, вы успешно подписались и теперь можете писать сообщения!",
-    sub_fail_text: "🚫 {user_mention}, вы все еще не подписаны на канал.\n\nПодпишитесь и попробуйте снова.",
-    sub_mute_text: "{user_mention} был заглушен на {duration} минут за отказ от подписки на канал."
+    sub_fail_text: "🚫 {user_mention}, не удалось подтвердить вашу подписку. Убедитесь, что подписаны на все каналы, и попробуйте снова.",
+    sub_mute_text: "{user_mention}, вы были временно ограничены в отправке сообщений на {duration} минут, так как не подписались на обязательные каналы."
   }
 };
 
@@ -82,7 +82,14 @@ function onOpen() {
 function userEnableBot() { enableBot(true); }
 function userDisableBot() { disableBot(true); }
 function userClearCache() { clearCache(true); }
-function userToggleExtendedLogging() { toggleExtendedLogging(true); }
+function userToggleExtendedLogging() {
+  try {
+    toggleExtendedLogging(true);
+  } catch (e) {
+    logToSheet('ERROR', `userToggleExtendedLogging failed: ${e && e.message ? e.message : e}`);
+    try { SpreadsheetApp.getUi().alert(`Ошибка переключения расширенных логов: ${e && e.message ? e.message : e}`); } catch (_) {}
+  }
+}
 function userEnableDeveloperMode() { enableDeveloperMode(true); }
 function userDisableDeveloperMode() { disableDeveloperMode(true); }
 
@@ -816,7 +823,8 @@ function handleCallbackQuery(callbackQuery, services, config) {
             });
         } else {
             // User is still not subscribed
-            let alertText = config.texts.sub_fail_text.replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
+            // Build alert text to match Python version (titles only, no links)
+            let alertText = '';
             
             // Update the message with channel info
             if (config.target_channel_url && config.target_channel_url.trim() !== '') {
@@ -829,7 +837,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 }
                 
                 const channelLink = `<a href="${config.target_channel_url}">${channelTitle.replace(/[<>]/g, '')}</a>`;
-                const updatedText = `${getMention(user)}, вы все еще не подписаны на:\n\n  • ${channelLink}\n\nПодпишитесь и попробуйте снова. Сообщение удалится через 15 сек.`;
+                const updatedText = `${getMention(user)}, вы все еще не подписаны на:\n\n  • ${channelLink}\n\nПодпишитесь и попробуйте снова.`;
                 
                 const keyboard = {
                     inline_keyboard: [
@@ -854,6 +862,10 @@ function handleCallbackQuery(callbackQuery, services, config) {
                     editOk: editResult?.ok,
                     channelTitle
                 });
+
+                // Alert mirrors Python: plain text with channel title only
+                const plainName = getMention(user).replace(/<[^>]*>/g, '');
+                alertText = `🚫 ${plainName}, вы все еще не подписаны на:\n  • ${String(channelTitle).replace(/[<>]/g, '')}\n\nПодпишитесь и попробуйте снова.`;
             }
             else {
                 // Нет URL — оставляем кнопку "Я подписался" для повторной проверки
@@ -874,6 +886,9 @@ function handleCallbackQuery(callbackQuery, services, config) {
                     userId: user.id,
                     editOk: editResult?.ok
                 });
+                // Fallback alert mirrors Python's generic failure text
+                alertText = (config.texts.sub_fail_text || DEFAULT_CONFIG.texts.sub_fail_text)
+                  .replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
             }
             
             sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: alertText, show_alert: true, cache_time: 5 });
