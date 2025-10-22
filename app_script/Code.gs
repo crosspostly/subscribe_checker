@@ -978,7 +978,7 @@ function handleMessage(message, services, config) {
                 };
             } else {
                 // Нет URL канала — отправляем текст без ссылки, но с кнопкой проверки
-                text = (config.texts.sub_warning_text_no_link || config.texts.sub_warning_text || DEFAULT_CONFIG.texts.sub_warning_text_no_link)
+                text = (config.texts.sub_warning_text || config.texts.sub_warning_text_no_link || DEFAULT_CONFIG.texts.sub_warning_text_no_link)
                   .replace('{user_mention}', getMention(user));
                 keyboard = {
                     inline_keyboard: [
