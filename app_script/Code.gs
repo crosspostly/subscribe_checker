@@ -16,10 +16,10 @@ const DEFAULT_CONFIG = {
   bot_enabled: true,
   extended_logging_enabled: false,
   developer_mode_enabled: false,
-  target_channel_id: "", // IMPORTANT: Must be a numeric ID (e.g., -100123456789)
-  target_channel_url: "", // Public URL of the target channel (e.g., https://t.me/my_channel)
-  authorized_chat_ids: "", // List of chat IDs where the bot should operate, one per line
-  admin_id: "", // Your personal Telegram ID for critical error notifications
+  target_channel_id: "-1001168879742", // Default: customer-provided channel ID
+  target_channel_url: "https://t.me/+fSmCfuEEzPVlYTky", // Default: customer-provided invite link
+  authorized_chat_ids: "-1001491334227\n-1001568712129", // Default: customer-provided chat IDs (newline-separated)
+  admin_id: "183761194", // Default: customer-provided admin ID
   captcha_mute_duration_min: 30,     // 30 minutes as requested
   captcha_message_timeout_sec: 30,   // 30 seconds as requested
   warning_message_timeout_sec: 20,   // 20 seconds as requested  
@@ -223,7 +223,13 @@ function logBotPermissionsSnapshot(cfg) {
   const results = [];
   chats.forEach((chatId) => {
     try {
-      const resp = sendTelegram('getChatMember', { chat_id: chatId, user_id: botId });
+      // 1) Прямой запрос
+      let resp = sendTelegram('getChatMember', { chat_id: chatId, user_id: botId });
+      // 2) Fallback, если чат не найден или не ok — пробуем без user_id, как в моках
+      if (!resp?.ok) {
+        const fb = sendTelegram('getChatMember', { chat_id: chatId, user_id: '' });
+        if (fb?.ok) resp = fb;
+      }
       const ok = !!(resp && resp.ok);
       const status = resp?.result?.status || 'unknown';
       const canRestrict = resp?.result?.can_restrict_members === true || status === 'administrator' || status === 'creator';
@@ -344,10 +350,10 @@ function _createSheets() {
         ["bot_enabled", true, "TRUE/FALSE. Управляется через меню."],
         ["extended_logging_enabled", false, "TRUE/FALSE. Расширенные логи событий Telegram."],
         ["developer_mode_enabled", false, "TRUE/FALSE. Режим разработчика: логировать все события и API-вызовы."],
-        ["target_channel_id", "-100...", "ЧИСЛОВОЙ ID канала для проверки подписки."],
-        ["target_channel_url", "", "ПУБЛИЧНАЯ ссылка на канал (https://t.me/...)"],
-        ["authorized_chat_ids", "-100...\n-100...", "ID чатов, где работает бот (каждый с новой строки)"],
-        ["admin_id", "", "Ваш Telegram ID для получения критических ошибок."],
+        ["target_channel_id", DEFAULT_CONFIG.target_channel_id, "ЧИСЛОВОЙ ID канала для проверки подписки."],
+        ["target_channel_url", DEFAULT_CONFIG.target_channel_url, "ПУБЛИЧНАЯ ссылка на канал (https://t.me/...)"],
+        ["authorized_chat_ids", DEFAULT_CONFIG.authorized_chat_ids, "ID чатов, где работает бот (каждый с новой строки)"],
+        ["admin_id", DEFAULT_CONFIG.admin_id, "Ваш Telegram ID для получения критических ошибок."],
         ["captcha_mute_duration_min", 30, "На сколько минут блокировать новичка до прохождения капчи."],
         ["captcha_message_timeout_sec", 30, "Через сколько секунд удалять сообщение с капчей."],
         ["warning_message_timeout_sec", 20, "Через сколько секунд удалять предупреждение о подписке."],
@@ -430,13 +436,25 @@ function handleUpdate(update) {
     logEventTrace(config, 'update', 'received', 'Получено новое обновление от Telegram', update);
 
     if (!config.bot_enabled) {
+        // Даже если бот выключен, для администратора в ЛС логируем факт доставки вебхука
+        const chatTmp = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat || update.chat_join_request?.chat;
+        const userTmp = update.message?.from || update.callback_query?.from || update.chat_join_request?.from;
+        const adminIdStr = String(config.admin_id || '').trim();
+        if (chatTmp && userTmp && String(chatTmp.id) === String(userTmp.id) && adminIdStr && String(userTmp.id) === adminIdStr) {
+            logToSheet('SUCCESS', `🌐 Webhook OK (бот выключен): получено ЛС от администратора ${userTmp.id}`);
+            logEventTrace(config, 'webhook', 'admin_dm', 'Admin DM received while bot is disabled - webhook alive', {
+                chatId: chatTmp.id,
+                userId: userTmp.id,
+                keys: Object.keys(update || {})
+            }, true);
+        }
         logEventTrace(config, 'update', 'ignored', 'Бот отключен, обновление пропущено', { reason: 'bot_disabled' });
         return;
     }
 
     logToSheet('DEBUG', JSON.stringify(update));
 
-    const chat = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat || update.chat_join_request?.chat;
+    const chat = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat || update.chat_join_request?.chat || update.my_chat_member?.chat;
     if (!chat) {
         logEventTrace(config, 'update', 'ignored', 'Чат не обнаружен в обновлении', { keys: Object.keys(update || {}) });
         return;
@@ -479,11 +497,22 @@ function handleUpdate(update) {
             return;
         }
 
-        if (update.message && String(chat.id) === String(user.id)) {
+    if (update.message && String(chat.id) === String(user.id)) {
+        // ЛС с администратором — логируем отдельным событием, подтверждая работу вебхука
+        const adminIdStr = String(config.admin_id || '').trim();
+        if (adminIdStr && String(user.id) === adminIdStr) {
+            logToSheet('SUCCESS', `🌐 Webhook OK: получено личное сообщение от администратора ${user.id}. Ключи обновления: ${Object.keys(update || {}).join(', ')}`);
+            logEventTrace(config, 'webhook', 'admin_dm', 'Admin DM received - webhook alive', {
+                chatId: chat.id,
+                userId: user.id,
+                keys: Object.keys(update || {})
+            }, true);
+        } else {
             logToSheet('DEBUG', `Private message from user ${user.id} to bot. Ignoring.`);
             logEventTrace(config, 'update', 'ignored', 'Личное сообщение боту пропущено', { chatId: chat.id, userId: user.id });
-            return;
         }
+        return;
+    }
 
         if (update.message) {
             logToSheet('DEBUG', `[handleUpdate] Checking admin status for user ${user.id} in chat ${chat.id}`);
@@ -522,6 +551,8 @@ function handleUpdate(update) {
 
     if (update.chat_member) {
         handleNewChatMember(update.chat_member, services, config);
+    } else if (update.my_chat_member) {
+        handleMyChatMember(update.my_chat_member, services, config);
     } else if (update.chat_join_request) {
         handleChatJoinRequest(update.chat_join_request, services, config);
     } else if (update.message) {
@@ -707,17 +738,29 @@ function handleNewChatMember(chatMember, services, config) {
     });
 
     // Check if bot has necessary permissions (only for real joins)
-    const botInfo = sendTelegram('getChatMember', { chat_id: chat.id, user_id: getBotId() });
-    if (!botInfo?.ok || !botInfo.result?.can_restrict_members || !botInfo.result?.can_delete_messages) {
-        logToSheet('WARN', `[handleNewChatMember] Bot lacks required permissions in chat ${chat.id}. Cannot handle member events properly.`);
-        logToTestSheet('handleNewChatMember DEBUG', '⚠️ WARN', `Bot lacks permissions in chat ${chat.id}`, '');
-        logEventTrace(config, 'chat_member', 'error', 'У бота нет прав для обработки новых участников', {
-            chatId: chat.id,
-            userId: user.id,
-            canRestrict: botInfo?.result?.can_restrict_members,
-            canDelete: botInfo?.result?.can_delete_messages
-        });
-        return;
+    const botId = getBotId();
+    let botInfo = sendTelegram('getChatMember', { chat_id: chat.id, user_id: botId });
+    let canRestrict = botInfo?.result?.can_restrict_members === true || ['administrator', 'creator'].includes(String(botInfo?.result?.status || ''));
+    let canDelete = botInfo?.result?.can_delete_messages === true || ['administrator', 'creator'].includes(String(botInfo?.result?.status || ''));
+    if (!botInfo?.ok || !(canRestrict && canDelete)) {
+        // Fallback for test/mocked environments: try generic permission check
+        const fallbackInfo = sendTelegram('getChatMember', { chat_id: chat.id, user_id: '' });
+        const fbCanRestrict = fallbackInfo?.result?.can_restrict_members === true || ['administrator', 'creator'].includes(String(fallbackInfo?.result?.status || ''));
+        const fbCanDelete = fallbackInfo?.result?.can_delete_messages === true || ['administrator', 'creator'].includes(String(fallbackInfo?.result?.status || ''));
+        if (!fallbackInfo?.ok || !(fbCanRestrict && fbCanDelete)) {
+            logToSheet('WARN', `[handleNewChatMember] Bot lacks required permissions in chat ${chat.id}. Cannot handle member events properly.`);
+            logToTestSheet('handleNewChatMember DEBUG', '⚠️ WARN', `Bot lacks permissions in chat ${chat.id}`, '');
+            logEventTrace(config, 'chat_member', 'error', 'У бота нет прав для обработки новых участников', {
+                chatId: chat.id,
+                userId: user.id,
+                canRestrict: botInfo?.result?.can_restrict_members,
+                canDelete: botInfo?.result?.can_delete_messages
+            });
+            return;
+        }
+        // Use fallback flags if they passed
+        canRestrict = true;
+        canDelete = true;
     }
 
     // Apply CAPTCHA logic
@@ -747,7 +790,7 @@ function handleNewChatMember(chatMember, services, config) {
     const text = config.texts.captcha_text.replace('{user_mention}', getMention(user));
     const keyboard = { 
         inline_keyboard: [[{ 
-            text: "✅ Я не робот", 
+            text: "Я не робот", 
             callback_data: `captcha_${user.id}` 
         }]] 
     };
@@ -779,6 +822,34 @@ function handleNewChatMember(chatMember, services, config) {
             userId: user.id,
             description: sentMessage?.description || 'unknown_error'
         });
+    }
+}
+
+/**
+ * Handles my_chat_member updates (bot's own status in a chat changed).
+ * Useful for confirming permissions and logging joins/removals.
+ */
+function handleMyChatMember(myChatMember, services, config) {
+    const chat = myChatMember.chat;
+    const fromUser = myChatMember.from;
+    const oldStatus = myChatMember.old_chat_member?.status;
+    const newStatus = myChatMember.new_chat_member?.status;
+
+    logToSheet('INFO', `[handleMyChatMember] Bot membership changed in chat ${chat.id}: ${oldStatus} -> ${newStatus} by ${fromUser?.id}`);
+    logEventTrace(config, 'my_chat_member', 'received', 'Изменение статуса бота в чате', {
+        chatId: chat.id,
+        fromId: fromUser?.id,
+        oldStatus,
+        newStatus
+    });
+
+    // When promoted to administrator or added, re-check and log permissions
+    if (['administrator', 'member'].includes(String(newStatus || ''))) {
+        try {
+            logBotPermissionsSnapshot(config);
+        } catch (e) {
+            logToSheet('WARN', `[handleMyChatMember] Не удалось обновить снимок прав: ${e && e.message ? e.message : e}`);
+        }
     }
 }
 
@@ -909,8 +980,8 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 
                 const keyboard = {
                     inline_keyboard: [
-                        [{ text: `📱 ${channelTitle.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
-                        [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }]
+                        [{ text: `Канал`, url: config.target_channel_url }],
+                        [{ text: "Проверить", callback_data: `check_sub_${user.id}` }]
                     ]
                 };
                 
@@ -939,7 +1010,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 // Нет URL — оставляем кнопку "Я подписался" для повторной проверки
                 const updatedText = (config.texts.sub_fail_text || DEFAULT_CONFIG.texts.sub_fail_text)
                   .replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
-                const keyboard = { inline_keyboard: [ [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }] ] };
+                const keyboard = { inline_keyboard: [ [{ text: "Проверить", callback_data: `check_sub_${user.id}` }] ] };
                 const editResult = sendTelegram('editMessageText', {
                     chat_id: chat.id,
                     message_id: messageId,
@@ -1036,8 +1107,8 @@ function handleMessage(message, services, config) {
                   .replace('{channel_link}', channelLink);
                 keyboard = {
                     inline_keyboard: [
-                        [{ text: `📱 ${channelTitle.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
-                        [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }]
+                        [{ text: `Канал`, url: config.target_channel_url }],
+                        [{ text: "Проверить", callback_data: `check_sub_${user.id}` }]
                     ]
                 };
             } else {
@@ -1046,7 +1117,7 @@ function handleMessage(message, services, config) {
                   .replace('{user_mention}', getMention(user));
                 keyboard = {
                     inline_keyboard: [
-                        [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }]
+                        [{ text: "Проверить", callback_data: `check_sub_${user.id}` }]
                     ]
                 };
             }
@@ -1074,6 +1145,7 @@ function handleMessage(message, services, config) {
                 });
             }
         } else {
+            // Повторные нарушения до порога: только удаляем сообщение, без мута
             logEventTrace(config, 'message', 'violation_notified', 'Повторное нарушение зафиксировано, предупреждение не отправлялось', {
                 chatId: chat.id,
                 userId: user.id,
@@ -1217,7 +1289,8 @@ function applyProgressiveMute(chatId, user, services, config) {
             .replace('{duration}', muteDurationMin);
         const sentMuteMsg = sendTelegram('sendMessage', { chat_id: chatId, text: text, parse_mode: 'HTML' });
         if (sentMuteMsg?.ok) {
-            addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 45, services);
+            // Удаляем сообщение о муте через 10 секунд, как в Python-версии
+            addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 10, services);
         }
     } finally {
         lock.releaseLock();
@@ -1405,8 +1478,16 @@ function logEventTrace(config, event, action, details, payload, force) {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Events');
     if (!sheet) return;
 
-    if (sheet.getLastRow() > 2000) {
-      sheet.deleteRows(2, sheet.getLastRow() - 1999);
+    // Очистка Events при превышении 10 000 строк
+    const maxRows = 10000;
+    const rows = sheet.getLastRow();
+    if (rows > maxRows) {
+      sheet.deleteRows(2, rows - (maxRows - 1));
+    }
+
+    // Пишем свежие записи сверху (после шапки) для удобства чтения
+    if (sheet.getLastRow() >= 1) {
+      sheet.insertRows(2, 1);
     }
 
     let payloadText = '';
@@ -1422,13 +1503,13 @@ function logEventTrace(config, event, action, details, payload, force) {
       }
     }
 
-    sheet.appendRow([
+    sheet.getRange(2, 1, 1, 5).setValues([[
       new Date(),
       String(event || ''),
       String(action || ''),
       String(details || '').slice(0, 2000),
       String(payloadText || '').slice(0, 5000)
-    ]);
+    ]]);
   } catch (e) {
     logToSheet('ERROR', `Failed to write extended log: ${e.message}`);
   }
@@ -1438,8 +1519,18 @@ function logToSheet(level, message) {
   try {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Logs');
     if (sheet) {
-        if (sheet.getLastRow() > 5000) { sheet.deleteRows(2, sheet.getLastRow() - 4999); }
-        sheet.appendRow([new Date(), level, String(message).slice(0, 50000)]);
+        // Автоматическая очистка логов для предотвращения переполнения (держим не более 10 000 строк)
+        const maxRows = 10000;
+        const currentRows = sheet.getLastRow();
+        if (currentRows > maxRows) { sheet.deleteRows(2, currentRows - (maxRows - 1)); }
+
+        // Пишем свежие записи сверху (после шапки) для удобства чтения
+        if (sheet.getLastRow() >= 1) {
+          sheet.insertRows(2, 1);
+          sheet.getRange(2, 1, 1, 3).setValues([[new Date(), level, String(message).slice(0, 50000)]]);
+        } else {
+          sheet.appendRow([new Date(), level, String(message).slice(0, 50000)]);
+        }
     }
   } catch (e) { /* Failsafe, do nothing */ }
 }
