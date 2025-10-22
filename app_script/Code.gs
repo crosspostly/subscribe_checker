@@ -1159,15 +1159,54 @@ function deleteMessage(chatId, messageId) {
 }
 
 function restrictUser(chatId, userId, canSendMessages, untilDate) {
-    const permissions = { 'can_send_messages': canSendMessages, 'can_send_media_messages': canSendMessages };
+    // Use full ChatPermissions set per current Bot API; do NOT stringify
+    const permissions = {
+        // Legacy aggregated permissions
+        can_send_messages: canSendMessages,
+        can_send_media_messages: canSendMessages,
+        can_send_polls: canSendMessages,
+        can_send_other_messages: canSendMessages,
+        can_add_web_page_previews: canSendMessages,
+        // Independent permissions (Bot API >= 7.0)
+        can_send_audios: canSendMessages,
+        can_send_documents: canSendMessages,
+        can_send_photos: canSendMessages,
+        can_send_videos: canSendMessages,
+        can_send_video_notes: canSendMessages,
+        can_send_voice_notes: canSendMessages
+    };
     return sendTelegram('restrictChatMember', {
-        chat_id: chatId, user_id: userId, permissions: JSON.stringify(permissions), until_date: untilDate || 0
+        chat_id: chatId,
+        user_id: userId,
+        permissions: permissions,
+        use_independent_chat_permissions: true,
+        until_date: untilDate || 0
     });
 }
 
 function unmuteUser(chatId, userId) {
-    const permissions = { 'can_send_messages': true, 'can_send_media_messages': true, 'can_send_other_messages': true, 'can_add_web_page_previews': true };
-    return sendTelegram('restrictChatMember', { chat_id: chatId, user_id: userId, permissions: JSON.stringify(permissions) });
+    // Restore full permissions; do NOT stringify
+    const permissions = {
+        // Legacy aggregated permissions
+        can_send_messages: true,
+        can_send_media_messages: true,
+        can_send_polls: true,
+        can_send_other_messages: true,
+        can_add_web_page_previews: true,
+        // Independent permissions (Bot API >= 7.0)
+        can_send_audios: true,
+        can_send_documents: true,
+        can_send_photos: true,
+        can_send_videos: true,
+        can_send_video_notes: true,
+        can_send_voice_notes: true
+    };
+    return sendTelegram('restrictChatMember', {
+        chat_id: chatId,
+        user_id: userId,
+        permissions: permissions,
+        use_independent_chat_permissions: true
+    });
 }
 
 function logEventTrace(config, event, action, details, payload, force) {
