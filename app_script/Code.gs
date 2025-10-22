@@ -98,6 +98,7 @@ function onOpen() {
     .addItem('🧑‍💻 Включить режим разработчика', 'userEnableDeveloperMode')
     .addItem('🧑‍💻 Выключить режим разработчика', 'userDisableDeveloperMode')
     .addItem('🔎 Проверить вебхук', 'userCheckWebhook')
+    .addItem('♻️ Сбросить вебхук (очистить очередь)', 'userResetWebhook')
     .addSeparator()
     .addItem('🧪 Запустить тесты', 'runTestsFromMenu')
     .addItem('🔄 Сбросить кэш (Настройки и Админы)', 'userClearCache')
@@ -119,6 +120,7 @@ function userToggleExtendedLogging() {
 function userEnableDeveloperMode() { enableDeveloperMode(true); }
 function userDisableDeveloperMode() { disableDeveloperMode(true); }
 function userCheckWebhook() { checkWebhook(true); }
+function userResetWebhook() { resetWebhook(true, true); }
 
 /**
  * Toggles extended event logging and updates the Config sheet accordingly.
@@ -221,7 +223,13 @@ function enableBot(showAlert) {
       }
       // Дополнительно: проверим состояние вебхука
       try {
-        checkWebhook(false);
+        const status = checkWebhook(false);
+        const pending = Number(status?.info?.result?.pending_update_count || 0);
+        const lastErr = String(status?.info?.result?.last_error_message || '');
+        if (pending > 10 || lastErr) {
+          logToSheet('WARN', `Авто-сброс вебхука: pending=${pending}, last_error='${lastErr}'`);
+          resetWebhook(false, true);
+        }
       } catch (whErr) {
         logToSheet('WARN', `Не удалось проверить вебхук: ${whErr && whErr.message ? whErr.message : whErr}`);
       }
@@ -289,6 +297,34 @@ function checkWebhook(showAlert) {
     try { SpreadsheetApp.getUi().alert(statusMsg); } catch(_) {}
   }
   return { info, expectedUrl, matches };
+}
+
+/**
+ * Re-sets webhook to WEB_APP_URL, optionally dropping pending updates.
+ */
+function resetWebhook(showAlert, dropPending) {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('BOT_TOKEN');
+  const url = String(props.getProperty('WEB_APP_URL') || '');
+  if (!token || !url) {
+    logToSheet('ERROR', 'resetWebhook: BOT_TOKEN/WEB_APP_URL not set');
+    if (showAlert) try { SpreadsheetApp.getUi().alert('BOT_TOKEN/WEB_APP_URL не заданы'); } catch(_) {}
+    return { ok: false };
+  }
+  try {
+    const endpoint = `https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(url)}${dropPending ? '&drop_pending_updates=true' : ''}`;
+    const resp = UrlFetchApp.fetch(endpoint, { method: 'get', muteHttpExceptions: true });
+    const json = JSON.parse(resp.getContentText());
+    const msg = `setWebhook -> ok=${json.ok}, description=${json.description || 'none'}, drop=${!!dropPending}`;
+    logToSheet(json.ok ? 'INFO' : 'WARN', msg);
+    logEventTrace(LOGGING_CONTEXT, 'settings', 'setWebhook', 'Webhook set/reset', { ok: json.ok, description: json.description, dropPending: !!dropPending, url }, true);
+    if (showAlert) try { SpreadsheetApp.getUi().alert(msg); } catch(_) {}
+    return json;
+  } catch (e) {
+    logToSheet('ERROR', `resetWebhook failed: ${e && e.message ? e.message : e}`);
+    if (showAlert) try { SpreadsheetApp.getUi().alert(`Ошибка: ${e && e.message ? e.message : e}`); } catch(_) {}
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
 }
 
 /**
