@@ -55,6 +55,23 @@ function setLoggingContext(flagOrConfig) {
   }
 }
 
+/**
+ * Reads getChatMember and logs effective status/permissions for diagnostics.
+ */
+function verifyAndLogChatMember(chatId, userId, tag) {
+  try {
+    const info = sendTelegram('getChatMember', { chat_id: chatId, user_id: userId });
+    const status = info?.result?.status;
+    const perms = info?.result || {};
+    logToSheet('INFO', `[verify:${tag}] chat=${chatId} user=${userId} status=${status} can_send_messages=${perms?.can_send_messages} can_send_media=${perms?.can_send_media_messages}`);
+    logEventTrace(LOGGING_CONTEXT, 'restrict_verify', 'getChatMember', 'Post-restrict verification', { chatId, userId, status, perms }, true);
+    return info;
+  } catch (e) {
+    logToSheet('ERROR', `[verify:${tag}] failed: ${e && e.message ? e.message : e}`);
+    return null;
+  }
+}
+
 // =================================================================================
 // =================  B. SPREADSHEET UI & MANUAL CONTROLS  ====================_
 // =================================================================================
@@ -787,6 +804,13 @@ function handleNewChatMember(chatMember, services, config) {
         muteUntil
     });
 
+    // Верификация фактических прав после restrict
+    try {
+        verifyAndLogChatMember(chat.id, user.id, 'captcha_restrict_verify');
+    } catch (e) {
+        logToSheet('WARN', `[handleNewChatMember] Verify restrict failed: ${e && e.message ? e.message : e}`);
+    }
+
     const text = config.texts.captcha_text.replace('{user_mention}', getMention(user));
     const keyboard = { 
         inline_keyboard: [[{ 
@@ -1275,8 +1299,13 @@ function applyProgressiveMute(chatId, user, services, config) {
             muteDurationMin = config.mute_level_3_duration_min;
         }
 
-        const muteUntil = Math.floor(new Date().getTime() / 1000 + muteDurationMin * 60);
-        restrictUser(chatId, userId, false, muteUntil);
+        const muteUntil = Math.floor(new Date().getTime() / 1000) + (muteDurationMin * 60);
+        const restrictResp = restrictUser(chatId, userId, false, muteUntil);
+        try {
+            verifyAndLogChatMember(chatId, userId, 'progressive_mute_verify');
+        } catch (e) {
+            logToSheet('WARN', `[applyProgressiveMute] Verify restrict failed: ${e && e.message ? e.message : e}`);
+        }
 
         if (userData) {
             usersSheet.getRange(userData.rowIndex, 2).setValue(newLevel);
@@ -1430,13 +1459,17 @@ function restrictUser(chatId, userId, canSendMessages, untilDate) {
         can_send_video_notes: canSendMessages,
         can_send_voice_notes: canSendMessages
     };
-    return sendTelegram('restrictChatMember', {
+    const payload = {
         chat_id: chatId,
         user_id: userId,
         permissions: permissions,
         use_independent_chat_permissions: true,
         until_date: untilDate || 0
-    });
+    };
+    const resp = sendTelegram('restrictChatMember', payload);
+    // Диагностика: логируем полезную нагрузку и ответ (в developer mode попадёт в Events)
+    logToSheet('DEBUG', `[restrictUser] payload=${JSON.stringify(payload)} respOk=${resp?.ok}`);
+    return resp;
 }
 
 function unmuteUser(chatId, userId) {
@@ -1456,12 +1489,15 @@ function unmuteUser(chatId, userId) {
         can_send_video_notes: true,
         can_send_voice_notes: true
     };
-    return sendTelegram('restrictChatMember', {
+    const payload = {
         chat_id: chatId,
         user_id: userId,
         permissions: permissions,
         use_independent_chat_permissions: true
-    });
+    };
+    const resp = sendTelegram('restrictChatMember', payload);
+    logToSheet('DEBUG', `[unmuteUser] payload=${JSON.stringify(payload)} respOk=${resp?.ok}`);
+    return resp;
 }
 
 function logEventTrace(config, event, action, details, payload, force) {
