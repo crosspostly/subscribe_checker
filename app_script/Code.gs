@@ -15,6 +15,7 @@
 const DEFAULT_CONFIG = {
   bot_enabled: true,
   extended_logging_enabled: false,
+  developer_mode_enabled: false,
   target_channel_id: "", // IMPORTANT: Must be a numeric ID (e.g., -100123456789)
   target_channel_url: "", // Public URL of the target channel (e.g., https://t.me/my_channel)
   authorized_chat_ids: "", // List of chat IDs where the bot should operate, one per line
@@ -42,13 +43,15 @@ const IGNORED_USER_IDS = ['136817688', '777000'];
 /**
  * Stores the most recent logging configuration to avoid recalculating for every helper call.
  */
-const LOGGING_CONTEXT = { extended_logging_enabled: false };
+const LOGGING_CONTEXT = { extended_logging_enabled: false, developer_mode_enabled: false };
 
 function setLoggingContext(flagOrConfig) {
   if (typeof flagOrConfig === 'boolean') {
     LOGGING_CONTEXT.extended_logging_enabled = flagOrConfig;
+    LOGGING_CONTEXT.developer_mode_enabled = false;
   } else {
     LOGGING_CONTEXT.extended_logging_enabled = !!(flagOrConfig && flagOrConfig.extended_logging_enabled);
+    LOGGING_CONTEXT.developer_mode_enabled = !!(flagOrConfig && flagOrConfig.developer_mode_enabled);
   }
 }
 
@@ -67,6 +70,8 @@ function onOpen() {
     .addItem('🟢 Включить бота', 'userEnableBot')
     .addItem('🔴 Выключить бота', 'userDisableBot')
     .addItem('📘 Переключить расширенные логи', 'userToggleExtendedLogging')
+    .addItem('🧑‍💻 Включить режим разработчика', 'userEnableDeveloperMode')
+    .addItem('🧑‍💻 Выключить режим разработчика', 'userDisableDeveloperMode')
     .addSeparator()
     .addItem('🧪 Запустить тесты', 'runTestsFromMenu')
     .addItem('🔄 Сбросить кэш (Настройки и Админы)', 'userClearCache')
@@ -78,6 +83,8 @@ function userEnableBot() { enableBot(true); }
 function userDisableBot() { disableBot(true); }
 function userClearCache() { clearCache(true); }
 function userToggleExtendedLogging() { toggleExtendedLogging(true); }
+function userEnableDeveloperMode() { enableDeveloperMode(true); }
+function userDisableDeveloperMode() { disableDeveloperMode(true); }
 
 /**
  * Toggles extended event logging and updates the Config sheet accordingly.
@@ -102,6 +109,33 @@ function toggleExtendedLogging(showAlert) {
   }
 
   return newState;
+}
+
+/**
+ * Enables developer mode: logs all events and API calls to Events sheet.
+ * Does not change bot behavior. Purely observational.
+ */
+function enableDeveloperMode(showAlert) {
+  updateConfigValue('developer_mode_enabled', true, '🧑‍💻 Режим разработчика: ВКЛ');
+  setLoggingContext({ extended_logging_enabled: LOGGING_CONTEXT.extended_logging_enabled, developer_mode_enabled: true });
+  logToSheet('INFO', '🧑‍💻 Режим разработчика включен. Все события и API-вызовы будут логироваться.');
+  logEventTrace(LOGGING_CONTEXT, 'settings', 'enable_developer_mode', 'Developer mode enabled', { developer_mode: true }, true);
+  if (showAlert) {
+    try { SpreadsheetApp.getUi().alert('🧑\u200d💻 Режим разработчика включен. Все события будут логироваться.'); } catch (e) {}
+  }
+}
+
+/**
+ * Disables developer mode logging.
+ */
+function disableDeveloperMode(showAlert) {
+  updateConfigValue('developer_mode_enabled', false, '🧑‍💻 Режим разработчика: ВЫКЛ');
+  setLoggingContext({ extended_logging_enabled: LOGGING_CONTEXT.extended_logging_enabled, developer_mode_enabled: false });
+  logToSheet('INFO', '🧑‍💻 Режим разработчика отключен. Возврат к стандартному логированию.');
+  logEventTrace(LOGGING_CONTEXT, 'settings', 'disable_developer_mode', 'Developer mode disabled', { developer_mode: false }, true);
+  if (showAlert) {
+    try { SpreadsheetApp.getUi().alert('🧑\u200d💻 Режим разработчика выключен.'); } catch (e) {}
+  }
 }
 
 /**
@@ -209,6 +243,7 @@ function _createSheets() {
         ["key", "value", "description"],
         ["bot_enabled", true, "TRUE/FALSE. Управляется через меню."],
         ["extended_logging_enabled", false, "TRUE/FALSE. Расширенные логи событий Telegram."],
+        ["developer_mode_enabled", false, "TRUE/FALSE. Режим разработчика: логировать все события и API-вызовы."],
         ["target_channel_id", "-100...", "ЧИСЛОВОЙ ID канала для проверки подписки."],
         ["target_channel_url", "", "ПУБЛИЧНАЯ ссылка на канал (https://t.me/...)"],
         ["authorized_chat_ids", "-100...\n-100...", "ID чатов, где работает бот (каждый с новой строки)"],
@@ -1144,12 +1179,24 @@ function sendTelegram(method, payload) {
             payload: JSON.stringify(payload), muteHttpExceptions: true
         });
         const json = JSON.parse(response.getContentText());
+        // Developer mode: log API request/response to Events sheet without altering behavior
+        if (LOGGING_CONTEXT.developer_mode_enabled) {
+            try {
+                logEventTrace(LOGGING_CONTEXT, 'tg_api', method, 'API call (developer mode)', {
+                    request: { method, payload },
+                    response: json
+                }, true);
+            } catch (e) { /* ignore logging failures */ }
+        }
         if (!json.ok) {
             logToSheet("WARN", `TG API Error (${method}): ${response.getContentText()}`);
         }
         return json;
     } catch (e) {
         logToSheet("ERROR", `API Call Failed: ${method}, ${e.message}`);
+        if (LOGGING_CONTEXT.developer_mode_enabled) {
+            try { logEventTrace(LOGGING_CONTEXT, 'tg_api', method, 'API call failed (developer mode)', { error: e.message }, true); } catch(_) {}
+        }
         return { ok: false, description: e.message };
     }
 }
@@ -1213,7 +1260,10 @@ function logEventTrace(config, event, action, details, payload, force) {
   // Skip logging during tests
   if (this.TEST_MODE) return;
   
-  const configFlag = typeof config === 'boolean' ? config : config?.extended_logging_enabled;
+  // In developer mode we always log everything
+  const configFlag = typeof config === 'boolean'
+    ? config
+    : (config?.developer_mode_enabled || config?.extended_logging_enabled || LOGGING_CONTEXT.developer_mode_enabled);
   if (!force && !configFlag) return;
 
   try {
