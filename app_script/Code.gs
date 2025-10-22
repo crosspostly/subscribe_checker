@@ -385,7 +385,8 @@ function _createSheets() {
         ["violation_limit", 3, "Сколько сообщений может написать пользователь без подписки перед мутом."],
         ["mute_level_1_duration_min", 60, "Длительность мута за первое нарушение."],
         ["mute_level_2_duration_min", 1440, "Длительность мута за второе нарушение (24 часа)."],
-        ["mute_level_3_duration_min", 10080, "Длительность мута за третье и последующие нарушения (7 дней)."]
+        ["mute_level_3_duration_min", 10080, "Длительность мута за третье и последующие нарушения (7 дней)."],
+        ["combined_mute_notice", true, "Отправлять объединённое сообщение (мут + инструкция по подписке)"]
     ],
     "Texts": [
         ["key", "value"],
@@ -568,6 +569,25 @@ function handleUpdate(update) {
     }
 
     logToSheet('DEBUG', `Event dispatcher: chat_member=${!!update.chat_member}, chat_join_request=${!!update.chat_join_request}, message=${!!update.message}, callback_query=${!!update.callback_query}`);
+    // Обработка join-сообщений (legacy): message.new_chat_members
+    if (update.message && Array.isArray(update.message.new_chat_members) && update.message.new_chat_members.length > 0) {
+        for (var i = 0; i < update.message.new_chat_members.length; i++) {
+            var nm = update.message.new_chat_members[i];
+            try {
+                const synthetic = {
+                    chat: update.message.chat,
+                    from: update.message.from, // может быть приглашавший; handleNewChatMember учтёт
+                    old_chat_member: { status: 'left' },
+                    new_chat_member: { status: 'member', user: nm }
+                };
+                handleNewChatMember(synthetic, services, config);
+            } catch (e) {
+                logToSheet('ERROR', `Failed to process new_chat_member via message: ${e && e.message ? e.message : e}`);
+            }
+        }
+        return;
+    }
+
     logEventTrace(config, 'update', 'dispatch', 'Передача обновления специализированному обработчику', {
         chatId: chat.id,
         userId: user?.id,
