@@ -16,10 +16,10 @@ const DEFAULT_CONFIG = {
   bot_enabled: true,
   extended_logging_enabled: false,
   developer_mode_enabled: false,
-  target_channel_id: "", // IMPORTANT: Must be a numeric ID (e.g., -100123456789)
-  target_channel_url: "", // Public URL of the target channel (e.g., https://t.me/my_channel)
-  authorized_chat_ids: "", // List of chat IDs where the bot should operate, one per line
-  admin_id: "", // Your personal Telegram ID for critical error notifications
+  target_channel_id: "-1001168879742", // Default: customer-provided channel ID
+  target_channel_url: "https://t.me/+fSmCfuEEzPVlYTky", // Default: customer-provided invite link
+  authorized_chat_ids: "-1001491334227", // Default: customer-provided chat ID
+  admin_id: "183761194", // Default: customer-provided admin ID
   captcha_mute_duration_min: 30,     // 30 minutes as requested
   captcha_message_timeout_sec: 30,   // 30 seconds as requested
   warning_message_timeout_sec: 20,   // 20 seconds as requested  
@@ -223,7 +223,13 @@ function logBotPermissionsSnapshot(cfg) {
   const results = [];
   chats.forEach((chatId) => {
     try {
-      const resp = sendTelegram('getChatMember', { chat_id: chatId, user_id: botId });
+      // 1) Прямой запрос
+      let resp = sendTelegram('getChatMember', { chat_id: chatId, user_id: botId });
+      // 2) Fallback, если чат не найден или не ok — пробуем без user_id, как в моках
+      if (!resp?.ok) {
+        const fb = sendTelegram('getChatMember', { chat_id: chatId, user_id: '' });
+        if (fb?.ok) resp = fb;
+      }
       const ok = !!(resp && resp.ok);
       const status = resp?.result?.status || 'unknown';
       const canRestrict = resp?.result?.can_restrict_members === true || status === 'administrator' || status === 'creator';
@@ -344,10 +350,10 @@ function _createSheets() {
         ["bot_enabled", true, "TRUE/FALSE. Управляется через меню."],
         ["extended_logging_enabled", false, "TRUE/FALSE. Расширенные логи событий Telegram."],
         ["developer_mode_enabled", false, "TRUE/FALSE. Режим разработчика: логировать все события и API-вызовы."],
-        ["target_channel_id", "-100...", "ЧИСЛОВОЙ ID канала для проверки подписки."],
-        ["target_channel_url", "", "ПУБЛИЧНАЯ ссылка на канал (https://t.me/...)"],
-        ["authorized_chat_ids", "-100...\n-100...", "ID чатов, где работает бот (каждый с новой строки)"],
-        ["admin_id", "", "Ваш Telegram ID для получения критических ошибок."],
+        ["target_channel_id", DEFAULT_CONFIG.target_channel_id, "ЧИСЛОВОЙ ID канала для проверки подписки."],
+        ["target_channel_url", DEFAULT_CONFIG.target_channel_url, "ПУБЛИЧНАЯ ссылка на канал (https://t.me/...)"],
+        ["authorized_chat_ids", DEFAULT_CONFIG.authorized_chat_ids, "ID чатов, где работает бот (каждый с новой строки)"],
+        ["admin_id", DEFAULT_CONFIG.admin_id, "Ваш Telegram ID для получения критических ошибок."],
         ["captcha_mute_duration_min", 30, "На сколько минут блокировать новичка до прохождения капчи."],
         ["captcha_message_timeout_sec", 30, "Через сколько секунд удалять сообщение с капчей."],
         ["warning_message_timeout_sec", 20, "Через сколько секунд удалять предупреждение о подписке."],
