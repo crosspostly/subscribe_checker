@@ -55,6 +55,14 @@ function setLoggingContext(flagOrConfig) {
   }
 }
 
+function getChatMemberSafe(chatId, userId) {
+  try {
+    return sendTelegram('getChatMember', { chat_id: chatId, user_id: userId });
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
  * Reads getChatMember and logs effective status/permissions for diagnostics.
  */
@@ -90,6 +98,7 @@ function onOpen() {
     .addItem('🧑‍💻 Включить режим разработчика', 'userEnableDeveloperMode')
     .addItem('🧑‍💻 Выключить режим разработчика', 'userDisableDeveloperMode')
     .addItem('🔎 Проверить вебхук', 'userCheckWebhook')
+    .addItem('♻️ Сбросить вебхук (очистить очередь)', 'userResetWebhook')
     .addSeparator()
     .addItem('🧪 Запустить тесты', 'runTestsFromMenu')
     .addItem('🔄 Сбросить кэш (Настройки и Админы)', 'userClearCache')
@@ -111,6 +120,7 @@ function userToggleExtendedLogging() {
 function userEnableDeveloperMode() { enableDeveloperMode(true); }
 function userDisableDeveloperMode() { disableDeveloperMode(true); }
 function userCheckWebhook() { checkWebhook(true); }
+function userResetWebhook() { resetWebhook(true, true); }
 
 /**
  * Toggles extended event logging and updates the Config sheet accordingly.
@@ -213,7 +223,13 @@ function enableBot(showAlert) {
       }
       // Дополнительно: проверим состояние вебхука
       try {
-        checkWebhook(false);
+        const status = checkWebhook(false);
+        const pending = Number(status?.info?.result?.pending_update_count || 0);
+        const lastErr = String(status?.info?.result?.last_error_message || '');
+        if (pending > 10 || lastErr) {
+          logToSheet('WARN', `Авто-сброс вебхука: pending=${pending}, last_error='${lastErr}'`);
+          resetWebhook(false, true);
+        }
       } catch (whErr) {
         logToSheet('WARN', `Не удалось проверить вебхук: ${whErr && whErr.message ? whErr.message : whErr}`);
       }
@@ -281,6 +297,34 @@ function checkWebhook(showAlert) {
     try { SpreadsheetApp.getUi().alert(statusMsg); } catch(_) {}
   }
   return { info, expectedUrl, matches };
+}
+
+/**
+ * Re-sets webhook to WEB_APP_URL, optionally dropping pending updates.
+ */
+function resetWebhook(showAlert, dropPending) {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('BOT_TOKEN');
+  const url = String(props.getProperty('WEB_APP_URL') || '');
+  if (!token || !url) {
+    logToSheet('ERROR', 'resetWebhook: BOT_TOKEN/WEB_APP_URL not set');
+    if (showAlert) try { SpreadsheetApp.getUi().alert('BOT_TOKEN/WEB_APP_URL не заданы'); } catch(_) {}
+    return { ok: false };
+  }
+  try {
+    const endpoint = `https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(url)}${dropPending ? '&drop_pending_updates=true' : ''}`;
+    const resp = UrlFetchApp.fetch(endpoint, { method: 'get', muteHttpExceptions: true });
+    const json = JSON.parse(resp.getContentText());
+    const msg = `setWebhook -> ok=${json.ok}, description=${json.description || 'none'}, drop=${!!dropPending}`;
+    logToSheet(json.ok ? 'INFO' : 'WARN', msg);
+    logEventTrace(LOGGING_CONTEXT, 'settings', 'setWebhook', 'Webhook set/reset', { ok: json.ok, description: json.description, dropPending: !!dropPending, url }, true);
+    if (showAlert) try { SpreadsheetApp.getUi().alert(msg); } catch(_) {}
+    return json;
+  } catch (e) {
+    logToSheet('ERROR', `resetWebhook failed: ${e && e.message ? e.message : e}`);
+    if (showAlert) try { SpreadsheetApp.getUi().alert(`Ошибка: ${e && e.message ? e.message : e}`); } catch(_) {}
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
 }
 
 /**
@@ -377,7 +421,8 @@ function _createSheets() {
         ["violation_limit", 3, "Сколько сообщений может написать пользователь без подписки перед мутом."],
         ["mute_level_1_duration_min", 60, "Длительность мута за первое нарушение."],
         ["mute_level_2_duration_min", 1440, "Длительность мута за второе нарушение (24 часа)."],
-        ["mute_level_3_duration_min", 10080, "Длительность мута за третье и последующие нарушения (7 дней)."]
+        ["mute_level_3_duration_min", 10080, "Длительность мута за третье и последующие нарушения (7 дней)."],
+        ["combined_mute_notice", true, "Отправлять объединённое сообщение (мут + инструкция по подписке)"]
     ],
     "Texts": [
         ["key", "value"],
@@ -560,6 +605,25 @@ function handleUpdate(update) {
     }
 
     logToSheet('DEBUG', `Event dispatcher: chat_member=${!!update.chat_member}, chat_join_request=${!!update.chat_join_request}, message=${!!update.message}, callback_query=${!!update.callback_query}`);
+    // Обработка join-сообщений (legacy): message.new_chat_members
+    if (update.message && Array.isArray(update.message.new_chat_members) && update.message.new_chat_members.length > 0) {
+        for (var i = 0; i < update.message.new_chat_members.length; i++) {
+            var nm = update.message.new_chat_members[i];
+            try {
+                const synthetic = {
+                    chat: update.message.chat,
+                    from: update.message.from, // может быть приглашавший; handleNewChatMember учтёт
+                    old_chat_member: { status: 'left' },
+                    new_chat_member: { status: 'member', user: nm }
+                };
+                handleNewChatMember(synthetic, services, config);
+            } catch (e) {
+                logToSheet('ERROR', `Failed to process new_chat_member via message: ${e && e.message ? e.message : e}`);
+            }
+        }
+        return;
+    }
+
     logEventTrace(config, 'update', 'dispatch', 'Передача обновления специализированному обработчику', {
         chatId: chat.id,
         userId: user?.id,
@@ -1088,6 +1152,22 @@ function handleMessage(message, services, config) {
         textLength: message.text ? message.text.length : 0
     });
     
+    // Если пользователь уже ограничен, не эскалируем и не шлём предупреждений
+    try {
+        const current = getChatMemberSafe(chat.id, user.id);
+        const until = current?.result?.until_date ? Number(current.result.until_date) : 0;
+        const nowSec = Math.floor(Date.now() / 1000);
+        const isRestricted = String(current?.result?.status || '') === 'restricted' || current?.result?.can_send_messages === false;
+        if (isRestricted && until > nowSec) {
+            // Попробуем удалить сообщение, но больше ничего не делаем
+            try { deleteMessage(chat.id, message.message_id); } catch(_) {}
+            logEventTrace(config, 'message', 'restricted_user_message', 'Сообщение от уже ограниченного пользователя, эскалация пропущена', {
+                chatId: chat.id, userId: user.id, until
+            });
+            return;
+        }
+    } catch(_) {}
+
     // Check subscription status
     const isMember = isUserSubscribed(user.id, config.target_channel_id);
     logToSheet('DEBUG', `[handleMessage] Subscription check for user ${user.id}: isMember=${isMember}`);
@@ -1271,6 +1351,7 @@ function isUserSubscribed(userId, channelId) {
     try {
         const response = sendTelegram('getChatMember', { chat_id: channelId, user_id: userId });
         const status = response?.result?.status;
+        // Для приватных/приглашений у getChatMember может вернуться 400/left — это корректно; выше try/catch уже обрабатывает.
         return ['creator', 'administrator', 'member'].includes(status);
     } catch (e) {
         logToSheet("ERROR", `Ошибка проверки подписки для user ${userId} в канале ${channelId}: ${e.message}`);
@@ -1316,7 +1397,26 @@ function applyProgressiveMute(chatId, user, services, config) {
         const text = config.texts.sub_mute_text
             .replace('{user_mention}', getMention(user))
             .replace('{duration}', muteDurationMin);
-        const sentMuteMsg = sendTelegram('sendMessage', { chat_id: chatId, text: text, parse_mode: 'HTML' });
+        // Отправляем одно объединённое сообщение: статус + кнопка подписки (если есть URL)
+        let keyboard = undefined;
+        if (config.target_channel_url && String(config.target_channel_url).trim() !== '') {
+            try {
+                const chInfo = sendTelegram('getChat', { chat_id: config.target_channel_id });
+                const title = chInfo?.result?.title || String(config.target_channel_id);
+                const link = `<a href="${config.target_channel_url}">${title.replace(/[<>]/g, '')}</a>`;
+                const warningTpl = (config.texts.sub_warning_text || DEFAULT_CONFIG.texts.sub_warning_text);
+                const extra = `\n\n` + warningTpl
+                  .replace('{user_mention}', getMention(user))
+                  .replace('{channel_link}', link);
+                text = text + extra;
+                keyboard = { inline_keyboard: [
+                  [{ text: `📱 ${title.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
+                  [{ text: '✅ Я подписался', callback_data: `check_sub_${user.id}` }]
+                ] };
+            } catch(_) {}
+        }
+
+        const sentMuteMsg = sendTelegram('sendMessage', { chat_id: chatId, text: text, parse_mode: 'HTML', reply_markup: keyboard ? JSON.stringify(keyboard) : undefined, disable_web_page_preview: true });
         if (sentMuteMsg?.ok) {
             // Удаляем сообщение о муте через 10 секунд, как в Python-версии
             addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 10, services);
