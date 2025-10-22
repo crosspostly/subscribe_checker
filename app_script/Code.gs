@@ -72,6 +72,7 @@ function onOpen() {
     .addItem('📘 Переключить расширенные логи', 'userToggleExtendedLogging')
     .addItem('🧑‍💻 Включить режим разработчика', 'userEnableDeveloperMode')
     .addItem('🧑‍💻 Выключить режим разработчика', 'userDisableDeveloperMode')
+    .addItem('🔎 Проверить вебхук', 'userCheckWebhook')
     .addSeparator()
     .addItem('🧪 Запустить тесты', 'runTestsFromMenu')
     .addItem('🔄 Сбросить кэш (Настройки и Админы)', 'userClearCache')
@@ -92,6 +93,7 @@ function userToggleExtendedLogging() {
 }
 function userEnableDeveloperMode() { enableDeveloperMode(true); }
 function userDisableDeveloperMode() { disableDeveloperMode(true); }
+function userCheckWebhook() { checkWebhook(true); }
 
 /**
  * Toggles extended event logging and updates the Config sheet accordingly.
@@ -186,6 +188,18 @@ function enableBot(showAlert) {
       logToSheet('INFO', `⚙️ Config snapshot: ${JSON.stringify(cfgSummary)}`);
       logToSheet('INFO', `📝 Texts snapshot: ${JSON.stringify(textsSummary)}`);
       logEventTrace(cfg, 'settings', 'config_snapshot', 'Config and texts on enable', { config: cfgSummary, texts: textsSummary }, true);
+      // Дополнительно: лог прав бота в разрешённых чатах
+      try {
+        logBotPermissionsSnapshot(cfg);
+      } catch (permErr) {
+        logToSheet('WARN', `Не удалось проверить права бота: ${permErr && permErr.message ? permErr.message : permErr}`);
+      }
+      // Дополнительно: проверим состояние вебхука
+      try {
+        checkWebhook(false);
+      } catch (whErr) {
+        logToSheet('WARN', `Не удалось проверить вебхук: ${whErr && whErr.message ? whErr.message : whErr}`);
+      }
     } catch (e) {
       logToSheet('WARN', `Failed to log config snapshot: ${e.message}`);
     }
@@ -194,6 +208,56 @@ function enableBot(showAlert) {
     logToSheet('WARN', `⚠️ Попытка включить бота не подтверждена Telegram: ${issue}`);
     logToTestSheet('enableBot', 'WARN', 'Бот включён, но проверка с Telegram не прошла', issue);
   }
+}
+
+/**
+ * Logs bot permissions for each authorized chat (delete, restrict) and writes an event trace.
+ */
+function logBotPermissionsSnapshot(cfg) {
+  const chats = (cfg && cfg.authorized_chat_ids ? cfg.authorized_chat_ids : []).map(String).filter(Boolean);
+  if (!chats.length) {
+    logToSheet('INFO', '🔐 Проверка прав: список authorized_chat_ids пуст. Пропускаем.');
+    return;
+  }
+  const botId = getBotId();
+  const results = [];
+  chats.forEach((chatId) => {
+    try {
+      const resp = sendTelegram('getChatMember', { chat_id: chatId, user_id: botId });
+      const ok = !!(resp && resp.ok);
+      const status = resp?.result?.status || 'unknown';
+      const canRestrict = resp?.result?.can_restrict_members === true || status === 'administrator' || status === 'creator';
+      const canDelete = resp?.result?.can_delete_messages === true || status === 'administrator' || status === 'creator';
+      results.push({ chat_id: chatId, ok, status, can_restrict_members: canRestrict, can_delete_messages: canDelete });
+      const level = (canRestrict && canDelete) ? 'INFO' : 'WARN';
+      logToSheet(level, `🔐 Права для чата ${chatId}: status=${status}, restrict=${canRestrict}, delete=${canDelete}`);
+    } catch (e) {
+      logToSheet('ERROR', `Не удалось получить права бота в чате ${chatId}: ${e && e.message ? e.message : e}`);
+    }
+  });
+  try { logEventTrace(cfg, 'settings', 'permissions_snapshot', 'Bot permissions by chat', { results }, true); } catch (_) {}
+}
+
+/**
+ * Checks webhook status via getWebhookInfo and logs a readable summary. Optionally shows an alert.
+ */
+function checkWebhook(showAlert) {
+  const info = sendTelegram('getWebhookInfo', {});
+  const props = PropertiesService.getScriptProperties();
+  const expectedUrl = String(props.getProperty('WEB_APP_URL') || '');
+  const url = info?.result?.url || '';
+  const pending = info?.result?.pending_update_count || 0;
+  const lastErrDate = info?.result?.last_error_date || 0;
+  const lastErrMsg = info?.result?.last_error_message || '';
+  const ip = info?.result?.ip_address || '';
+  const matches = expectedUrl && url ? (String(url).indexOf(expectedUrl) === 0 || String(expectedUrl).indexOf(url) === 0) : (expectedUrl === url);
+  const statusMsg = `🌐 Webhook: url='${url || '-'}', expected='${expectedUrl || '-'}', matches=${matches}, pending=${pending}, last_error=${lastErrMsg ? '[' + lastErrMsg + ']' : 'none'}, ip=${ip || '-'}`;
+  logToSheet(matches ? 'INFO' : 'WARN', statusMsg);
+  try { logEventTrace(LOGGING_CONTEXT, 'settings', 'webhook_status', 'Webhook check', { url, expectedUrl, pending, lastErrDate, lastErrMsg, ip, matches }, true); } catch(_) {}
+  if (showAlert) {
+    try { SpreadsheetApp.getUi().alert(statusMsg); } catch(_) {}
+  }
+  return { info, expectedUrl, matches };
 }
 
 /**
@@ -978,7 +1042,7 @@ function handleMessage(message, services, config) {
                 };
             } else {
                 // Нет URL канала — отправляем текст без ссылки, но с кнопкой проверки
-                text = (config.texts.sub_warning_text_no_link || config.texts.sub_warning_text || DEFAULT_CONFIG.texts.sub_warning_text_no_link)
+                text = (config.texts.sub_warning_text || config.texts.sub_warning_text_no_link || DEFAULT_CONFIG.texts.sub_warning_text_no_link)
                   .replace('{user_mention}', getMention(user));
                 keyboard = {
                     inline_keyboard: [
