@@ -454,7 +454,7 @@ function handleUpdate(update) {
 
     logToSheet('DEBUG', JSON.stringify(update));
 
-    const chat = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat || update.chat_join_request?.chat;
+    const chat = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat || update.chat_join_request?.chat || update.my_chat_member?.chat;
     if (!chat) {
         logEventTrace(config, 'update', 'ignored', 'Чат не обнаружен в обновлении', { keys: Object.keys(update || {}) });
         return;
@@ -551,6 +551,8 @@ function handleUpdate(update) {
 
     if (update.chat_member) {
         handleNewChatMember(update.chat_member, services, config);
+    } else if (update.my_chat_member) {
+        handleMyChatMember(update.my_chat_member, services, config);
     } else if (update.chat_join_request) {
         handleChatJoinRequest(update.chat_join_request, services, config);
     } else if (update.message) {
@@ -820,6 +822,34 @@ function handleNewChatMember(chatMember, services, config) {
             userId: user.id,
             description: sentMessage?.description || 'unknown_error'
         });
+    }
+}
+
+/**
+ * Handles my_chat_member updates (bot's own status in a chat changed).
+ * Useful for confirming permissions and logging joins/removals.
+ */
+function handleMyChatMember(myChatMember, services, config) {
+    const chat = myChatMember.chat;
+    const fromUser = myChatMember.from;
+    const oldStatus = myChatMember.old_chat_member?.status;
+    const newStatus = myChatMember.new_chat_member?.status;
+
+    logToSheet('INFO', `[handleMyChatMember] Bot membership changed in chat ${chat.id}: ${oldStatus} -> ${newStatus} by ${fromUser?.id}`);
+    logEventTrace(config, 'my_chat_member', 'received', 'Изменение статуса бота в чате', {
+        chatId: chat.id,
+        fromId: fromUser?.id,
+        oldStatus,
+        newStatus
+    });
+
+    // When promoted to administrator or added, re-check and log permissions
+    if (['administrator', 'member'].includes(String(newStatus || ''))) {
+        try {
+            logBotPermissionsSnapshot(config);
+        } catch (e) {
+            logToSheet('WARN', `[handleMyChatMember] Не удалось обновить снимок прав: ${e && e.message ? e.message : e}`);
+        }
     }
 }
 
