@@ -15,6 +15,7 @@
 const DEFAULT_CONFIG = {
   bot_enabled: true,
   extended_logging_enabled: false,
+  developer_mode_enabled: false,
   target_channel_id: "", // IMPORTANT: Must be a numeric ID (e.g., -100123456789)
   target_channel_url: "", // Public URL of the target channel (e.g., https://t.me/my_channel)
   authorized_chat_ids: "", // List of chat IDs where the bot should operate, one per line
@@ -42,13 +43,15 @@ const IGNORED_USER_IDS = ['136817688', '777000'];
 /**
  * Stores the most recent logging configuration to avoid recalculating for every helper call.
  */
-const LOGGING_CONTEXT = { extended_logging_enabled: false };
+const LOGGING_CONTEXT = { extended_logging_enabled: false, developer_mode_enabled: false };
 
 function setLoggingContext(flagOrConfig) {
   if (typeof flagOrConfig === 'boolean') {
     LOGGING_CONTEXT.extended_logging_enabled = flagOrConfig;
+    LOGGING_CONTEXT.developer_mode_enabled = false;
   } else {
     LOGGING_CONTEXT.extended_logging_enabled = !!(flagOrConfig && flagOrConfig.extended_logging_enabled);
+    LOGGING_CONTEXT.developer_mode_enabled = !!(flagOrConfig && flagOrConfig.developer_mode_enabled);
   }
 }
 
@@ -67,6 +70,8 @@ function onOpen() {
     .addItem('🟢 Включить бота', 'userEnableBot')
     .addItem('🔴 Выключить бота', 'userDisableBot')
     .addItem('📘 Переключить расширенные логи', 'userToggleExtendedLogging')
+    .addItem('🧑‍💻 Включить режим разработчика', 'userEnableDeveloperMode')
+    .addItem('🧑‍💻 Выключить режим разработчика', 'userDisableDeveloperMode')
     .addSeparator()
     .addItem('🧪 Запустить тесты', 'runTestsFromMenu')
     .addItem('🔄 Сбросить кэш (Настройки и Админы)', 'userClearCache')
@@ -78,6 +83,8 @@ function userEnableBot() { enableBot(true); }
 function userDisableBot() { disableBot(true); }
 function userClearCache() { clearCache(true); }
 function userToggleExtendedLogging() { toggleExtendedLogging(true); }
+function userEnableDeveloperMode() { enableDeveloperMode(true); }
+function userDisableDeveloperMode() { disableDeveloperMode(true); }
 
 /**
  * Toggles extended event logging and updates the Config sheet accordingly.
@@ -105,6 +112,33 @@ function toggleExtendedLogging(showAlert) {
 }
 
 /**
+ * Enables developer mode: logs all events and API calls to Events sheet.
+ * Does not change bot behavior. Purely observational.
+ */
+function enableDeveloperMode(showAlert) {
+  updateConfigValue('developer_mode_enabled', true, '🧑‍💻 Режим разработчика: ВКЛ');
+  setLoggingContext({ extended_logging_enabled: LOGGING_CONTEXT.extended_logging_enabled, developer_mode_enabled: true });
+  logToSheet('INFO', '🧑‍💻 Режим разработчика включен. Все события и API-вызовы будут логироваться.');
+  logEventTrace(LOGGING_CONTEXT, 'settings', 'enable_developer_mode', 'Developer mode enabled', { developer_mode: true }, true);
+  if (showAlert) {
+    try { SpreadsheetApp.getUi().alert('🧑\u200d💻 Режим разработчика включен. Все события будут логироваться.'); } catch (e) {}
+  }
+}
+
+/**
+ * Disables developer mode logging.
+ */
+function disableDeveloperMode(showAlert) {
+  updateConfigValue('developer_mode_enabled', false, '🧑‍💻 Режим разработчика: ВЫКЛ');
+  setLoggingContext({ extended_logging_enabled: LOGGING_CONTEXT.extended_logging_enabled, developer_mode_enabled: false });
+  logToSheet('INFO', '🧑‍💻 Режим разработчика отключен. Возврат к стандартному логированию.');
+  logEventTrace(LOGGING_CONTEXT, 'settings', 'disable_developer_mode', 'Developer mode disabled', { developer_mode: false }, true);
+  if (showAlert) {
+    try { SpreadsheetApp.getUi().alert('🧑\u200d💻 Режим разработчика выключен.'); } catch (e) {}
+  }
+}
+
+/**
  * Enables the bot by setting the 'bot_enabled' flag to true.
  * @param {boolean} showAlert If true, shows a UI alert to the user.
  */
@@ -119,6 +153,35 @@ function enableBot(showAlert) {
     const botName = healthCheck.result?.username || healthCheck.result?.id;
     logToSheet('INFO', `🤖 Бот успешно включен. Telegram ответил: ${botName}`);
     logToTestSheet('enableBot', 'INFO', 'Бот включён, запрос проверки прошёл успешно', JSON.stringify(healthCheck.result || {}));
+    // Log current configuration and texts snapshot for visibility
+    try {
+      const cfg = getCachedConfig();
+      const cfgSummary = {
+        bot_enabled: cfg.bot_enabled,
+        developer_mode_enabled: !!cfg.developer_mode_enabled,
+        extended_logging_enabled: !!cfg.extended_logging_enabled,
+        authorized_chat_ids: (cfg.authorized_chat_ids || []).map(String),
+        target_channel_id: String(cfg.target_channel_id || ''),
+        target_channel_url: String(cfg.target_channel_url || ''),
+        violation_limit: cfg.violation_limit,
+        captcha_mute_duration_min: cfg.captcha_mute_duration_min,
+        warning_message_timeout_sec: cfg.warning_message_timeout_sec,
+        mute_schedule_min: [cfg.mute_level_1_duration_min, cfg.mute_level_2_duration_min, cfg.mute_level_3_duration_min]
+      };
+      const textsSummary = {
+        captcha_text: cfg.texts?.captcha_text,
+        sub_warning_text: cfg.texts?.sub_warning_text,
+        sub_warning_text_no_link: cfg.texts?.sub_warning_text_no_link || DEFAULT_CONFIG.texts.sub_warning_text_no_link,
+        sub_success_text: cfg.texts?.sub_success_text,
+        sub_fail_text: cfg.texts?.sub_fail_text,
+        sub_mute_text: cfg.texts?.sub_mute_text
+      };
+      logToSheet('INFO', `⚙️ Config snapshot: ${JSON.stringify(cfgSummary)}`);
+      logToSheet('INFO', `📝 Texts snapshot: ${JSON.stringify(textsSummary)}`);
+      logEventTrace(cfg, 'settings', 'config_snapshot', 'Config and texts on enable', { config: cfgSummary, texts: textsSummary }, true);
+    } catch (e) {
+      logToSheet('WARN', `Failed to log config snapshot: ${e.message}`);
+    }
   } else {
     const issue = healthCheck?.description || 'нет ответа';
     logToSheet('WARN', `⚠️ Попытка включить бота не подтверждена Telegram: ${issue}`);
@@ -209,6 +272,7 @@ function _createSheets() {
         ["key", "value", "description"],
         ["bot_enabled", true, "TRUE/FALSE. Управляется через меню."],
         ["extended_logging_enabled", false, "TRUE/FALSE. Расширенные логи событий Telegram."],
+        ["developer_mode_enabled", false, "TRUE/FALSE. Режим разработчика: логировать все события и API-вызовы."],
         ["target_channel_id", "-100...", "ЧИСЛОВОЙ ID канала для проверки подписки."],
         ["target_channel_url", "", "ПУБЛИЧНАЯ ссылка на канал (https://t.me/...)"],
         ["authorized_chat_ids", "-100...\n-100...", "ID чатов, где работает бот (каждый с новой строки)"],
@@ -225,6 +289,8 @@ function _createSheets() {
         ["key", "value"],
         ["captcha_text", DEFAULT_CONFIG.texts.captcha_text],
         ["sub_warning_text", DEFAULT_CONFIG.texts.sub_warning_text],
+        ["sub_success_text", DEFAULT_CONFIG.texts.sub_success_text],
+        ["sub_fail_text", DEFAULT_CONFIG.texts.sub_fail_text],
         ["sub_mute_text", "{user_mention} был заглушен на {duration} минут за отказ от подписки на канал."]
     ],
     "Users": [["user_id", "mute_level", "first_violation_date"]],
@@ -789,6 +855,26 @@ function handleCallbackQuery(callbackQuery, services, config) {
                     channelTitle
                 });
             }
+            else {
+                // Нет URL — оставляем кнопку "Я подписался" для повторной проверки
+                const updatedText = (config.texts.sub_fail_text || DEFAULT_CONFIG.texts.sub_fail_text)
+                  .replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
+                const keyboard = { inline_keyboard: [ [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }] ] };
+                const editResult = sendTelegram('editMessageText', {
+                    chat_id: chat.id,
+                    message_id: messageId,
+                    text: updatedText,
+                    parse_mode: 'HTML',
+                    reply_markup: JSON.stringify(keyboard),
+                    disable_web_page_preview: true
+                });
+                addMessageToCleaner(chat.id, messageId, 15, services);
+                logEventTrace(config, 'callback_query', 'subscription_pending', 'Нет URL канала, обновлено без ссылки', {
+                    chatId: chat.id,
+                    userId: user.id,
+                    editOk: editResult?.ok
+                });
+            }
             
             sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: alertText, show_alert: true, cache_time: 5 });
         }
@@ -854,22 +940,14 @@ function handleMessage(message, services, config) {
     if (violationCount < config.violation_limit) {
         if (violationCount === 1) { // Send warning only on the first violation
             let text;
-            let keyboard = null;
-            
-            // Проверяем, указан ли URL канала в конфигурации
+            let keyboard;
+
+            // Всегда показываем кнопку проверки подписки. Ссылку на канал добавляем, если есть URL.
             if (config.target_channel_url && config.target_channel_url.trim() !== '') {
-                // Пытаемся получить информацию о канале, чтобы взять его название
                 const channelInfo = sendTelegram('getChat', { chat_id: config.target_channel_id });
-                // Используем название канала, если оно доступно, иначе — ID канала как запасной вариант
                 const channelTitle = channelInfo?.result?.title || config.target_channel_id;
-                
-                // Создаем HTML-ссылку в тексте
                 const channelLink = `<a href="${config.target_channel_url}">${channelTitle.replace(/[<>]/g, '')}</a>`;
-                
-                // Формируем текст сообщения
                 text = `${getMention(user)}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:\n\n  • ${channelLink}\n\nПосле подписки нажмите кнопку ниже.`;
-                
-                // Создаем inline-клавиатуру с кнопками
                 keyboard = {
                     inline_keyboard: [
                         [{ text: `📱 ${channelTitle.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
@@ -877,15 +955,21 @@ function handleMessage(message, services, config) {
                     ]
                 };
             } else {
-                // Если URL не указан, используем стандартный текст
-                text = config.texts.sub_warning_text.replace('{user_mention}', getMention(user));
+                // Нет URL канала — отправляем текст без ссылки, но с кнопкой проверки
+                text = (config.texts.sub_warning_text_no_link || config.texts.sub_warning_text || DEFAULT_CONFIG.texts.sub_warning_text_no_link)
+                  .replace('{user_mention}', getMention(user));
+                keyboard = {
+                    inline_keyboard: [
+                        [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }]
+                    ]
+                };
             }
 
-            const sentWarning = sendTelegram('sendMessage', { 
-                chat_id: chat.id, 
-                text: text, 
+            const sentWarning = sendTelegram('sendMessage', {
+                chat_id: chat.id,
+                text: text,
                 parse_mode: 'HTML',
-                reply_markup: keyboard ? JSON.stringify(keyboard) : undefined,
+                reply_markup: JSON.stringify(keyboard),
                 disable_web_page_preview: true
             });
             if (sentWarning?.ok) {
@@ -894,7 +978,7 @@ function handleMessage(message, services, config) {
                     chatId: chat.id,
                     userId: user.id,
                     messageId: sentWarning.result.message_id,
-                    hasChannelLink: !!keyboard
+                    hasChannelLink: !!(config.target_channel_url && config.target_channel_url.trim() !== '')
                 });
             } else {
                 logEventTrace(config, 'message', 'error', 'Не удалось отправить предупреждение о подписке', {
@@ -1144,12 +1228,24 @@ function sendTelegram(method, payload) {
             payload: JSON.stringify(payload), muteHttpExceptions: true
         });
         const json = JSON.parse(response.getContentText());
+        // Developer mode: log API request/response to Events sheet without altering behavior
+        if (LOGGING_CONTEXT.developer_mode_enabled) {
+            try {
+                logEventTrace(LOGGING_CONTEXT, 'tg_api', method, 'API call (developer mode)', {
+                    request: { method, payload },
+                    response: json
+                }, true);
+            } catch (e) { /* ignore logging failures */ }
+        }
         if (!json.ok) {
             logToSheet("WARN", `TG API Error (${method}): ${response.getContentText()}`);
         }
         return json;
     } catch (e) {
         logToSheet("ERROR", `API Call Failed: ${method}, ${e.message}`);
+        if (LOGGING_CONTEXT.developer_mode_enabled) {
+            try { logEventTrace(LOGGING_CONTEXT, 'tg_api', method, 'API call failed (developer mode)', { error: e.message }, true); } catch(_) {}
+        }
         return { ok: false, description: e.message };
     }
 }
@@ -1159,22 +1255,64 @@ function deleteMessage(chatId, messageId) {
 }
 
 function restrictUser(chatId, userId, canSendMessages, untilDate) {
-    const permissions = { 'can_send_messages': canSendMessages, 'can_send_media_messages': canSendMessages };
+    // Use full ChatPermissions set per current Bot API; do NOT stringify
+    const permissions = {
+        // Legacy aggregated permissions
+        can_send_messages: canSendMessages,
+        can_send_media_messages: canSendMessages,
+        can_send_polls: canSendMessages,
+        can_send_other_messages: canSendMessages,
+        can_add_web_page_previews: canSendMessages,
+        // Independent permissions (Bot API >= 7.0)
+        can_send_audios: canSendMessages,
+        can_send_documents: canSendMessages,
+        can_send_photos: canSendMessages,
+        can_send_videos: canSendMessages,
+        can_send_video_notes: canSendMessages,
+        can_send_voice_notes: canSendMessages
+    };
     return sendTelegram('restrictChatMember', {
-        chat_id: chatId, user_id: userId, permissions: JSON.stringify(permissions), until_date: untilDate || 0
+        chat_id: chatId,
+        user_id: userId,
+        permissions: permissions,
+        use_independent_chat_permissions: true,
+        until_date: untilDate || 0
     });
 }
 
 function unmuteUser(chatId, userId) {
-    const permissions = { 'can_send_messages': true, 'can_send_media_messages': true, 'can_send_other_messages': true, 'can_add_web_page_previews': true };
-    return sendTelegram('restrictChatMember', { chat_id: chatId, user_id: userId, permissions: JSON.stringify(permissions) });
+    // Restore full permissions; do NOT stringify
+    const permissions = {
+        // Legacy aggregated permissions
+        can_send_messages: true,
+        can_send_media_messages: true,
+        can_send_polls: true,
+        can_send_other_messages: true,
+        can_add_web_page_previews: true,
+        // Independent permissions (Bot API >= 7.0)
+        can_send_audios: true,
+        can_send_documents: true,
+        can_send_photos: true,
+        can_send_videos: true,
+        can_send_video_notes: true,
+        can_send_voice_notes: true
+    };
+    return sendTelegram('restrictChatMember', {
+        chat_id: chatId,
+        user_id: userId,
+        permissions: permissions,
+        use_independent_chat_permissions: true
+    });
 }
 
 function logEventTrace(config, event, action, details, payload, force) {
   // Skip logging during tests
   if (this.TEST_MODE) return;
   
-  const configFlag = typeof config === 'boolean' ? config : config?.extended_logging_enabled;
+  // In developer mode we always log everything
+  const configFlag = typeof config === 'boolean'
+    ? config
+    : (config?.developer_mode_enabled || config?.extended_logging_enabled || LOGGING_CONTEXT.developer_mode_enabled);
   if (!force && !configFlag) return;
 
   try {
