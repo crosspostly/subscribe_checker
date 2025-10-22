@@ -55,6 +55,14 @@ function setLoggingContext(flagOrConfig) {
   }
 }
 
+function getChatMemberSafe(chatId, userId) {
+  try {
+    return sendTelegram('getChatMember', { chat_id: chatId, user_id: userId });
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
  * Reads getChatMember and logs effective status/permissions for diagnostics.
  */
@@ -1088,6 +1096,22 @@ function handleMessage(message, services, config) {
         textLength: message.text ? message.text.length : 0
     });
     
+    // Если пользователь уже ограничен, не эскалируем и не шлём предупреждений
+    try {
+        const current = getChatMemberSafe(chat.id, user.id);
+        const until = current?.result?.until_date ? Number(current.result.until_date) : 0;
+        const nowSec = Math.floor(Date.now() / 1000);
+        const isRestricted = String(current?.result?.status || '') === 'restricted' || current?.result?.can_send_messages === false;
+        if (isRestricted && until > nowSec) {
+            // Попробуем удалить сообщение, но больше ничего не делаем
+            try { deleteMessage(chat.id, message.message_id); } catch(_) {}
+            logEventTrace(config, 'message', 'restricted_user_message', 'Сообщение от уже ограниченного пользователя, эскалация пропущена', {
+                chatId: chat.id, userId: user.id, until
+            });
+            return;
+        }
+    } catch(_) {}
+
     // Check subscription status
     const isMember = isUserSubscribed(user.id, config.target_channel_id);
     logToSheet('DEBUG', `[handleMessage] Subscription check for user ${user.id}: isMember=${isMember}`);
@@ -1271,6 +1295,7 @@ function isUserSubscribed(userId, channelId) {
     try {
         const response = sendTelegram('getChatMember', { chat_id: channelId, user_id: userId });
         const status = response?.result?.status;
+        // Для приватных/приглашений у getChatMember может вернуться 400/left — это корректно; выше try/catch уже обрабатывает.
         return ['creator', 'administrator', 'member'].includes(status);
     } catch (e) {
         logToSheet("ERROR", `Ошибка проверки подписки для user ${userId} в канале ${channelId}: ${e.message}`);
@@ -1316,7 +1341,26 @@ function applyProgressiveMute(chatId, user, services, config) {
         const text = config.texts.sub_mute_text
             .replace('{user_mention}', getMention(user))
             .replace('{duration}', muteDurationMin);
-        const sentMuteMsg = sendTelegram('sendMessage', { chat_id: chatId, text: text, parse_mode: 'HTML' });
+        // Отправляем одно объединённое сообщение: статус + кнопка подписки (если есть URL)
+        let keyboard = undefined;
+        if (config.target_channel_url && String(config.target_channel_url).trim() !== '') {
+            try {
+                const chInfo = sendTelegram('getChat', { chat_id: config.target_channel_id });
+                const title = chInfo?.result?.title || String(config.target_channel_id);
+                const link = `<a href="${config.target_channel_url}">${title.replace(/[<>]/g, '')}</a>`;
+                const warningTpl = (config.texts.sub_warning_text || DEFAULT_CONFIG.texts.sub_warning_text);
+                const extra = `\n\n` + warningTpl
+                  .replace('{user_mention}', getMention(user))
+                  .replace('{channel_link}', link);
+                text = text + extra;
+                keyboard = { inline_keyboard: [
+                  [{ text: `📱 ${title.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
+                  [{ text: '✅ Я подписался', callback_data: `check_sub_${user.id}` }]
+                ] };
+            } catch(_) {}
+        }
+
+        const sentMuteMsg = sendTelegram('sendMessage', { chat_id: chatId, text: text, parse_mode: 'HTML', reply_markup: keyboard ? JSON.stringify(keyboard) : undefined, disable_web_page_preview: true });
         if (sentMuteMsg?.ok) {
             // Удаляем сообщение о муте через 10 секунд, как в Python-версии
             addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 10, services);
