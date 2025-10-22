@@ -1107,8 +1107,8 @@ function handleMessage(message, services, config) {
                   .replace('{channel_link}', channelLink);
                 keyboard = {
                     inline_keyboard: [
-                        [{ text: `📱 ${channelTitle.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
-                        [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }]
+                        [{ text: `Канал`, url: config.target_channel_url }],
+                        [{ text: "Проверить", callback_data: `check_sub_${user.id}` }]
                     ]
                 };
             } else {
@@ -1117,7 +1117,7 @@ function handleMessage(message, services, config) {
                   .replace('{user_mention}', getMention(user));
                 keyboard = {
                     inline_keyboard: [
-                        [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }]
+                        [{ text: "Проверить", callback_data: `check_sub_${user.id}` }]
                     ]
                 };
             }
@@ -1145,6 +1145,7 @@ function handleMessage(message, services, config) {
                 });
             }
         } else {
+            // Повторные нарушения до порога: только удаляем сообщение, без мута
             logEventTrace(config, 'message', 'violation_notified', 'Повторное нарушение зафиксировано, предупреждение не отправлялось', {
                 chatId: chat.id,
                 userId: user.id,
@@ -1484,6 +1485,11 @@ function logEventTrace(config, event, action, details, payload, force) {
       sheet.deleteRows(2, rows - (maxRows - 1));
     }
 
+    // Пишем свежие записи сверху (после шапки) для удобства чтения
+    if (sheet.getLastRow() >= 1) {
+      sheet.insertRows(2, 1);
+    }
+
     let payloadText = '';
     if (payload !== undefined && payload !== null) {
       if (typeof payload === 'string') {
@@ -1497,13 +1503,13 @@ function logEventTrace(config, event, action, details, payload, force) {
       }
     }
 
-    sheet.appendRow([
+    sheet.getRange(2, 1, 1, 5).setValues([[
       new Date(),
       String(event || ''),
       String(action || ''),
       String(details || '').slice(0, 2000),
       String(payloadText || '').slice(0, 5000)
-    ]);
+    ]]);
   } catch (e) {
     logToSheet('ERROR', `Failed to write extended log: ${e.message}`);
   }
@@ -1513,12 +1519,18 @@ function logToSheet(level, message) {
   try {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Logs');
     if (sheet) {
-        // Автоматическая очистка логов для предотвращения переполнения
-        // Google Sheets лимиты: до ~10 млн ячеек на таблицу; для безопасности режем лист логов до 10 000 строк
+        // Автоматическая очистка логов для предотвращения переполнения (держим не более 10 000 строк)
         const maxRows = 10000;
         const currentRows = sheet.getLastRow();
         if (currentRows > maxRows) { sheet.deleteRows(2, currentRows - (maxRows - 1)); }
-        sheet.appendRow([new Date(), level, String(message).slice(0, 50000)]);
+
+        // Пишем свежие записи сверху (после шапки) для удобства чтения
+        if (sheet.getLastRow() >= 1) {
+          sheet.insertRows(2, 1);
+          sheet.getRange(2, 1, 1, 3).setValues([[new Date(), level, String(message).slice(0, 50000)]]);
+        } else {
+          sheet.appendRow([new Date(), level, String(message).slice(0, 50000)]);
+        }
     }
   } catch (e) { /* Failsafe, do nothing */ }
 }
