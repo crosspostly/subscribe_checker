@@ -29,11 +29,12 @@ const DEFAULT_CONFIG = {
   mute_level_3_duration_min: 10080,  // 7 days as requested (10080 min)
   texts: {
     captcha_text: "{user_mention}, добро пожаловать! Чтобы писать в чат, подтвердите, что вы не робот.",
-    sub_warning_text: "{user_mention}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:\n\n  • {channel_link}\n\nПосле подписки нажмите кнопку ниже.",
+    sub_warning_text: "{user_mention}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:",
     sub_warning_text_no_link: "{user_mention}, чтобы отправлять сообщения в этот чат, вы должны быть подписаны на наш канал.",
     sub_success_text: "🎉 {user_mention}, вы успешно подписались и теперь можете писать сообщения!",
-    sub_fail_text: "🚫 {user_mention}, вы все еще не подписаны на канал.\n\nПодпишитесь и попробуйте снова.",
-    sub_mute_text: "{user_mention} был заглушен на {duration} минут за отказ от подписки на канал."
+    sub_fail_text: "🚫 {user_mention}, вы все еще не подписаны на:",
+    sub_mute_text: "{user_mention}, вы были временно ограничены в отправке сообщений на 30 минут, так как не подписались на обязательные каналы.",
+    sub_mute_channels_header: "Необходимо подписаться на:"
   }
 };
 
@@ -95,14 +96,17 @@ function toggleExtendedLogging(showAlert) {
   const newState = !config.extended_logging_enabled;
 
   updateConfigValue('extended_logging_enabled', newState, newState ? '📘 Расширенные логи: ВКЛ' : '📕 Расширенные логи: ВЫКЛ');
-  setLoggingContext(newState);
+  
+  // Reload config after cache clear to get updated values
+  const updatedConfig = getCachedConfig();
+  setLoggingContext(updatedConfig);
 
   const message = newState
     ? '🔔 Расширенное логирование включено. Все события и реакции бота будут фиксироваться на листе "Events".'
     : 'ℹ️ Расширенное логирование отключено. Запись событий в лист "Events" приостановлена.';
 
   logToSheet('INFO', message);
-  logEventTrace(LOGGING_CONTEXT, 'settings', newState ? 'enable_extended_logging' : 'disable_extended_logging', message, { extended_logging: newState }, true);
+  logEventTrace(updatedConfig, 'settings', newState ? 'enable_extended_logging' : 'disable_extended_logging', message, { extended_logging: newState }, true);
 
   if (showAlert) {
     try { SpreadsheetApp.getUi().alert(message); } catch (e) {}
@@ -117,9 +121,13 @@ function toggleExtendedLogging(showAlert) {
  */
 function enableDeveloperMode(showAlert) {
   updateConfigValue('developer_mode_enabled', true, '🧑‍💻 Режим разработчика: ВКЛ');
-  setLoggingContext({ extended_logging_enabled: LOGGING_CONTEXT.extended_logging_enabled, developer_mode_enabled: true });
+  
+  // Reload config after cache clear to get updated values
+  const updatedConfig = getCachedConfig();
+  setLoggingContext(updatedConfig);
+  
   logToSheet('INFO', '🧑‍💻 Режим разработчика включен. Все события и API-вызовы будут логироваться.');
-  logEventTrace(LOGGING_CONTEXT, 'settings', 'enable_developer_mode', 'Developer mode enabled', { developer_mode: true }, true);
+  logEventTrace(updatedConfig, 'settings', 'enable_developer_mode', 'Developer mode enabled', { developer_mode: true }, true);
   if (showAlert) {
     try { SpreadsheetApp.getUi().alert('🧑\u200d💻 Режим разработчика включен. Все события будут логироваться.'); } catch (e) {}
   }
@@ -130,9 +138,13 @@ function enableDeveloperMode(showAlert) {
  */
 function disableDeveloperMode(showAlert) {
   updateConfigValue('developer_mode_enabled', false, '🧑‍💻 Режим разработчика: ВЫКЛ');
-  setLoggingContext({ extended_logging_enabled: LOGGING_CONTEXT.extended_logging_enabled, developer_mode_enabled: false });
+  
+  // Reload config after cache clear to get updated values
+  const updatedConfig = getCachedConfig();
+  setLoggingContext(updatedConfig);
+  
   logToSheet('INFO', '🧑‍💻 Режим разработчика отключен. Возврат к стандартному логированию.');
-  logEventTrace(LOGGING_CONTEXT, 'settings', 'disable_developer_mode', 'Developer mode disabled', { developer_mode: false }, true);
+  logEventTrace(updatedConfig, 'settings', 'disable_developer_mode', 'Developer mode disabled', { developer_mode: false }, true);
   if (showAlert) {
     try { SpreadsheetApp.getUi().alert('🧑\u200d💻 Режим разработчика выключен.'); } catch (e) {}
   }
@@ -291,7 +303,8 @@ function _createSheets() {
         ["sub_warning_text", DEFAULT_CONFIG.texts.sub_warning_text],
         ["sub_success_text", DEFAULT_CONFIG.texts.sub_success_text],
         ["sub_fail_text", DEFAULT_CONFIG.texts.sub_fail_text],
-        ["sub_mute_text", "{user_mention} был заглушен на {duration} минут за отказ от подписки на канал."]
+        ["sub_mute_text", DEFAULT_CONFIG.texts.sub_mute_text],
+        ["sub_mute_channels_header", DEFAULT_CONFIG.texts.sub_mute_channels_header]
     ],
     "Users": [["user_id", "mute_level", "first_violation_date"]],
     "Logs": [["Timestamp", "Level", "Message"]],
@@ -816,7 +829,8 @@ function handleCallbackQuery(callbackQuery, services, config) {
             });
         } else {
             // User is still not subscribed
-            let alertText = config.texts.sub_fail_text.replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
+            const failText = (config.texts.sub_fail_text || DEFAULT_CONFIG.texts.sub_fail_text).replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
+            let alertText = failText + "\n\nПодпишитесь и попробуйте снова.";
             
             // Update the message with channel info
             if (config.target_channel_url && config.target_channel_url.trim() !== '') {
@@ -829,7 +843,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 }
                 
                 const channelLink = `<a href="${config.target_channel_url}">${channelTitle.replace(/[<>]/g, '')}</a>`;
-                const updatedText = `${getMention(user)}, вы все еще не подписаны на:\n\n  • ${channelLink}\n\nПодпишитесь и попробуйте снова. Сообщение удалится через 15 сек.`;
+                const updatedText = `${getMention(user)}, вы все еще не подписаны на:\n\n  • ${channelLink}\n\nПодпишитесь и попробуйте снова.`;
                 
                 const keyboard = {
                     inline_keyboard: [
@@ -857,8 +871,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
             }
             else {
                 // Нет URL — оставляем кнопку "Я подписался" для повторной проверки
-                const updatedText = (config.texts.sub_fail_text || DEFAULT_CONFIG.texts.sub_fail_text)
-                  .replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
+                const updatedText = failText + "\n\nПодпишитесь и попробуйте снова.";
                 const keyboard = { inline_keyboard: [ [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }] ] };
                 const editResult = sendTelegram('editMessageText', {
                     chat_id: chat.id,
@@ -947,7 +960,9 @@ function handleMessage(message, services, config) {
                 const channelInfo = sendTelegram('getChat', { chat_id: config.target_channel_id });
                 const channelTitle = channelInfo?.result?.title || config.target_channel_id;
                 const channelLink = `<a href="${config.target_channel_url}">${channelTitle.replace(/[<>]/g, '')}</a>`;
-                text = `${getMention(user)}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:\n\n  • ${channelLink}\n\nПосле подписки нажмите кнопку ниже.`;
+                // Format exactly like Python version
+                const warningText = (config.texts.sub_warning_text || DEFAULT_CONFIG.texts.sub_warning_text).replace('{user_mention}', getMention(user));
+                text = `${warningText}\n\n  • ${channelLink}\n\nПосле подписки нажмите кнопку ниже.`;
                 keyboard = {
                     inline_keyboard: [
                         [{ text: `📱 ${channelTitle.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
@@ -1126,9 +1141,30 @@ function applyProgressiveMute(chatId, user, services, config) {
             usersSheet.appendRow([userId, newLevel, new Date()]);
         }
 
-        const text = config.texts.sub_mute_text
-            .replace('{user_mention}', getMention(user))
-            .replace('{duration}', muteDurationMin);
+        let textParts = [config.texts.sub_mute_text.replace('{user_mention}', getMention(user))];
+        
+        // Add channel list if available (similar to Python version)
+        if (config.target_channel_id && config.target_channel_id.trim() !== '') {
+            const channelsHeader = config.texts.sub_mute_channels_header || "Необходимо подписаться на:";
+            textParts.push(channelsHeader);
+            
+            try {
+                const channelInfo = sendTelegram('getChat', { chat_id: config.target_channel_id });
+                const channelTitle = channelInfo?.result?.title || `Канал ID ${config.target_channel_id}`;
+                
+                if (config.target_channel_url && config.target_channel_url.trim() !== '') {
+                    const channelLink = `<a href="${config.target_channel_url}">${channelTitle.replace(/[<>]/g, '')}</a>`;
+                    textParts.push(`  • ${channelLink}`);
+                } else {
+                    textParts.push(`  • <b>${channelTitle.replace(/[<>]/g, '')}</b>`);
+                }
+            } catch (e) {
+                logToSheet('WARN', `Failed to get channel info for mute message: ${e.message}`);
+                textParts.push(`  • Канал ID ${config.target_channel_id}`);
+            }
+        }
+        
+        const text = textParts.join('\n');
         const sentMuteMsg = sendTelegram('sendMessage', { chat_id: chatId, text: text, parse_mode: 'HTML' });
         if (sentMuteMsg?.ok) {
             addMessageToCleaner(chatId, sentMuteMsg.result.message_id, 45, services);
