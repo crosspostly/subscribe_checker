@@ -153,6 +153,35 @@ function enableBot(showAlert) {
     const botName = healthCheck.result?.username || healthCheck.result?.id;
     logToSheet('INFO', `🤖 Бот успешно включен. Telegram ответил: ${botName}`);
     logToTestSheet('enableBot', 'INFO', 'Бот включён, запрос проверки прошёл успешно', JSON.stringify(healthCheck.result || {}));
+    // Log current configuration and texts snapshot for visibility
+    try {
+      const cfg = getCachedConfig();
+      const cfgSummary = {
+        bot_enabled: cfg.bot_enabled,
+        developer_mode_enabled: !!cfg.developer_mode_enabled,
+        extended_logging_enabled: !!cfg.extended_logging_enabled,
+        authorized_chat_ids: (cfg.authorized_chat_ids || []).map(String),
+        target_channel_id: String(cfg.target_channel_id || ''),
+        target_channel_url: String(cfg.target_channel_url || ''),
+        violation_limit: cfg.violation_limit,
+        captcha_mute_duration_min: cfg.captcha_mute_duration_min,
+        warning_message_timeout_sec: cfg.warning_message_timeout_sec,
+        mute_schedule_min: [cfg.mute_level_1_duration_min, cfg.mute_level_2_duration_min, cfg.mute_level_3_duration_min]
+      };
+      const textsSummary = {
+        captcha_text: cfg.texts?.captcha_text,
+        sub_warning_text: cfg.texts?.sub_warning_text,
+        sub_warning_text_no_link: cfg.texts?.sub_warning_text_no_link || DEFAULT_CONFIG.texts.sub_warning_text_no_link,
+        sub_success_text: cfg.texts?.sub_success_text,
+        sub_fail_text: cfg.texts?.sub_fail_text,
+        sub_mute_text: cfg.texts?.sub_mute_text
+      };
+      logToSheet('INFO', `⚙️ Config snapshot: ${JSON.stringify(cfgSummary)}`);
+      logToSheet('INFO', `📝 Texts snapshot: ${JSON.stringify(textsSummary)}`);
+      logEventTrace(cfg, 'settings', 'config_snapshot', 'Config and texts on enable', { config: cfgSummary, texts: textsSummary }, true);
+    } catch (e) {
+      logToSheet('WARN', `Failed to log config snapshot: ${e.message}`);
+    }
   } else {
     const issue = healthCheck?.description || 'нет ответа';
     logToSheet('WARN', `⚠️ Попытка включить бота не подтверждена Telegram: ${issue}`);
@@ -260,6 +289,8 @@ function _createSheets() {
         ["key", "value"],
         ["captcha_text", DEFAULT_CONFIG.texts.captcha_text],
         ["sub_warning_text", DEFAULT_CONFIG.texts.sub_warning_text],
+        ["sub_success_text", DEFAULT_CONFIG.texts.sub_success_text],
+        ["sub_fail_text", DEFAULT_CONFIG.texts.sub_fail_text],
         ["sub_mute_text", "{user_mention} был заглушен на {duration} минут за отказ от подписки на канал."]
     ],
     "Users": [["user_id", "mute_level", "first_violation_date"]],
@@ -824,6 +855,26 @@ function handleCallbackQuery(callbackQuery, services, config) {
                     channelTitle
                 });
             }
+            else {
+                // Нет URL — оставляем кнопку "Я подписался" для повторной проверки
+                const updatedText = (config.texts.sub_fail_text || DEFAULT_CONFIG.texts.sub_fail_text)
+                  .replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
+                const keyboard = { inline_keyboard: [ [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }] ] };
+                const editResult = sendTelegram('editMessageText', {
+                    chat_id: chat.id,
+                    message_id: messageId,
+                    text: updatedText,
+                    parse_mode: 'HTML',
+                    reply_markup: JSON.stringify(keyboard),
+                    disable_web_page_preview: true
+                });
+                addMessageToCleaner(chat.id, messageId, 15, services);
+                logEventTrace(config, 'callback_query', 'subscription_pending', 'Нет URL канала, обновлено без ссылки', {
+                    chatId: chat.id,
+                    userId: user.id,
+                    editOk: editResult?.ok
+                });
+            }
             
             sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: alertText, show_alert: true, cache_time: 5 });
         }
@@ -889,22 +940,14 @@ function handleMessage(message, services, config) {
     if (violationCount < config.violation_limit) {
         if (violationCount === 1) { // Send warning only on the first violation
             let text;
-            let keyboard = null;
-            
-            // Проверяем, указан ли URL канала в конфигурации
+            let keyboard;
+
+            // Всегда показываем кнопку проверки подписки. Ссылку на канал добавляем, если есть URL.
             if (config.target_channel_url && config.target_channel_url.trim() !== '') {
-                // Пытаемся получить информацию о канале, чтобы взять его название
                 const channelInfo = sendTelegram('getChat', { chat_id: config.target_channel_id });
-                // Используем название канала, если оно доступно, иначе — ID канала как запасной вариант
                 const channelTitle = channelInfo?.result?.title || config.target_channel_id;
-                
-                // Создаем HTML-ссылку в тексте
                 const channelLink = `<a href="${config.target_channel_url}">${channelTitle.replace(/[<>]/g, '')}</a>`;
-                
-                // Формируем текст сообщения
                 text = `${getMention(user)}, чтобы писать сообщения в этом чате, пожалуйста, подпишитесь на:\n\n  • ${channelLink}\n\nПосле подписки нажмите кнопку ниже.`;
-                
-                // Создаем inline-клавиатуру с кнопками
                 keyboard = {
                     inline_keyboard: [
                         [{ text: `📱 ${channelTitle.replace(/[<>]/g, '')}`, url: config.target_channel_url }],
@@ -912,15 +955,21 @@ function handleMessage(message, services, config) {
                     ]
                 };
             } else {
-                // Если URL не указан, используем стандартный текст
-                text = config.texts.sub_warning_text.replace('{user_mention}', getMention(user));
+                // Нет URL канала — отправляем текст без ссылки, но с кнопкой проверки
+                text = (config.texts.sub_warning_text_no_link || config.texts.sub_warning_text || DEFAULT_CONFIG.texts.sub_warning_text_no_link)
+                  .replace('{user_mention}', getMention(user));
+                keyboard = {
+                    inline_keyboard: [
+                        [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }]
+                    ]
+                };
             }
 
-            const sentWarning = sendTelegram('sendMessage', { 
-                chat_id: chat.id, 
-                text: text, 
+            const sentWarning = sendTelegram('sendMessage', {
+                chat_id: chat.id,
+                text: text,
                 parse_mode: 'HTML',
-                reply_markup: keyboard ? JSON.stringify(keyboard) : undefined,
+                reply_markup: JSON.stringify(keyboard),
                 disable_web_page_preview: true
             });
             if (sentWarning?.ok) {
@@ -929,7 +978,7 @@ function handleMessage(message, services, config) {
                     chatId: chat.id,
                     userId: user.id,
                     messageId: sentWarning.result.message_id,
-                    hasChannelLink: !!keyboard
+                    hasChannelLink: !!(config.target_channel_url && config.target_channel_url.trim() !== '')
                 });
             } else {
                 logEventTrace(config, 'message', 'error', 'Не удалось отправить предупреждение о подписке', {
