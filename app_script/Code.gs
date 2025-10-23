@@ -1034,13 +1034,38 @@ function handleCallbackQuery(callbackQuery, services, config) {
         // Check subscription
         // Не кэшировать ответ на кнопку: Telegram может переиспользовать старый текст
         sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '⏳ Проверяем вашу подписку...', cache_time: 0 });
-        
-        const isMember = isUserSubscribed(user.id, config.target_channel_id);
-        
+
+        // Прямая проверка подписки с различением ошибок
+        let isMember = false;
+        let apiError = null;
+        try {
+            const resp = sendTelegram('getChatMember', { chat_id: config.target_channel_id, user_id: user.id });
+            if (resp && resp.ok) {
+                const status = resp.result && resp.result.status;
+                isMember = ['creator', 'administrator', 'member'].includes(String(status || ''));
+            } else {
+                apiError = resp;
+            }
+        } catch (e) {
+            apiError = { description: String(e && e.message ? e.message : e) };
+        }
+
+        if (apiError && apiError.description) {
+            const desc = String(apiError.description).toLowerCase();
+            const temporaryFailure = !(desc.includes('user not found') || desc.includes('user is not a member') || desc.includes('not found'));
+            if (temporaryFailure) {
+                // Временная ошибка проверки — краткий ответ и выходим
+                sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Извините, не удалось проверить подписку. Попробуйте ещё раз.', show_alert: true, cache_time: 0 });
+                logEventTrace(config, 'callback_query', 'check_failed', 'Не удалось проверить подписку (временная ошибка)', { chatId: chat.id, userId: user.id, error: apiError.description }, true);
+                return;
+            }
+            // Для кейса user not found трактуем как не подписан
+        }
+
         if (isMember) {
             // User is subscribed - success
             services.cache.remove(`violations_${user.id}`);
-            const deleteResult = deleteMessage(chat.id, messageId);
+            let deleteResult = null; try { deleteResult = deleteMessage(chat.id, messageId); } catch(_) {}
             
             const successMsg = config.texts.sub_success_text.replace('{user_mention}', getMention(user));
             const sentMsg = sendTelegram('sendMessage', { 
@@ -1086,14 +1111,18 @@ function handleCallbackQuery(callbackQuery, services, config) {
                     ]
                 };
                 
-                const editResult = sendTelegram('editMessageText', {
+                // Если текст идентичен, не пытаемся редактировать
+                let editResult = { ok: true };
+                if (String(callbackQuery.message.text || '') !== String(updatedText || '')) {
+                  editResult = sendTelegram('editMessageText', {
                     chat_id: chat.id,
                     message_id: messageId,
                     text: updatedText,
                     parse_mode: 'HTML',
                     reply_markup: JSON.stringify(keyboard),
                     disable_web_page_preview: true
-                });
+                  });
+                }
                 
                 addMessageToCleaner(chat.id, messageId, 15, services);
                 logEventTrace(config, 'callback_query', 'subscription_pending', 'Пользователь ещё не подписан, сообщение обновлено', {
@@ -1112,14 +1141,17 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 const updatedText = (config.texts.sub_fail_text || DEFAULT_CONFIG.texts.sub_fail_text)
                   .replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
                 const keyboard = { inline_keyboard: [ [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }] ] };
-                const editResult = sendTelegram('editMessageText', {
+                let editResult = { ok: true };
+                if (String(callbackQuery.message.text || '') !== String(updatedText || '')) {
+                  editResult = sendTelegram('editMessageText', {
                     chat_id: chat.id,
                     message_id: messageId,
                     text: updatedText,
                     parse_mode: 'HTML',
                     reply_markup: JSON.stringify(keyboard),
                     disable_web_page_preview: true
-                });
+                  });
+                }
                 addMessageToCleaner(chat.id, messageId, 15, services);
                 logEventTrace(config, 'callback_query', 'subscription_pending', 'Нет URL канала, обновлено без ссылки', {
                     chatId: chat.id,
