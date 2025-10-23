@@ -835,22 +835,23 @@ function handleNewChatMember(chatMember, services, config) {
     let canRestrict = botInfo?.result?.can_restrict_members === true || ['administrator', 'creator'].includes(String(botInfo?.result?.status || ''));
     let canDelete = botInfo?.result?.can_delete_messages === true || ['administrator', 'creator'].includes(String(botInfo?.result?.status || ''));
     if (!botInfo?.ok || !(canRestrict && canDelete)) {
-        // Fallback for test/mocked environments: try generic permission check
-        const fallbackInfo = sendTelegram('getChatMember', { chat_id: chat.id, user_id: '' });
-        const fbCanRestrict = fallbackInfo?.result?.can_restrict_members === true || ['administrator', 'creator'].includes(String(fallbackInfo?.result?.status || ''));
-        const fbCanDelete = fallbackInfo?.result?.can_delete_messages === true || ['administrator', 'creator'].includes(String(fallbackInfo?.result?.status || ''));
-        if (!fallbackInfo?.ok || !(fbCanRestrict && fbCanDelete)) {
+        // Альтернативная проверка: через список админов
+        try {
+            const adminsInfo = sendTelegram('getChatAdministrators', { chat_id: chat.id });
+            if (adminsInfo?.ok) {
+                const adminIds = (adminsInfo.result || []).map(a => a.user && a.user.id).filter(Boolean);
+                if (adminIds.includes(botId)) {
+                    canRestrict = true;
+                    canDelete = true;
+                }
+            }
+        } catch(_) {}
+
+        if (!canRestrict || !canDelete) {
             // Продолжаем попытку restrict, даже если не смогли подтвердить права (пусть API ответ подтвердит/опровергнет)
             logToSheet('WARN', `[handleNewChatMember] Bot permissions not confirmed in chat ${chat.id}. Will attempt restrict anyway.`);
             logToTestSheet('handleNewChatMember DEBUG', '⚠️ WARN', `Permissions not confirmed; attempting restrict`, '');
-            logEventTrace(config, 'chat_member', 'warn', 'Права бота не подтверждены, пробуем restrict', {
-                chatId: chat.id,
-                userId: user.id
-            });
-        } else {
-        // Use fallback flags if they passed
-        canRestrict = true;
-        canDelete = true;
+            logEventTrace(config, 'chat_member', 'warn', 'Права бота не подтверждены, пробуем restrict', { chatId: chat.id, userId: user.id });
         }
     }
 
@@ -1031,7 +1032,8 @@ function handleCallbackQuery(callbackQuery, services, config) {
         }
         
         // Check subscription
-        sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '⏳ Проверяем вашу подписку...', cache_time: 2 });
+        // Не кэшировать ответ на кнопку: Telegram может переиспользовать старый текст
+        sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '⏳ Проверяем вашу подписку...', cache_time: 0 });
         
         const isMember = isUserSubscribed(user.id, config.target_channel_id);
         
