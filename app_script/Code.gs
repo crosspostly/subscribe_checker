@@ -1057,6 +1057,8 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 // Временная ошибка проверки — краткий ответ и выходим
                 sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Извините, не удалось проверить подписку. Попробуйте ещё раз.', show_alert: true, cache_time: 0 });
                 logEventTrace(config, 'callback_query', 'check_failed', 'Не удалось проверить подписку (временная ошибка)', { chatId: chat.id, userId: user.id, error: apiError.description }, true);
+                // Удаляем системное сообщение с кнопкой, чтобы не вводить в заблуждение
+                try { deleteMessage(chat.id, messageId); } catch(_) {}
                 return;
             }
             // Для кейса user not found трактуем как не подписан
