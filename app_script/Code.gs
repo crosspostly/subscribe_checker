@@ -897,7 +897,8 @@ function handleNewChatMember(chatMember, services, config) {
         chat_id: chat.id,
         text: text,
         parse_mode: 'HTML',
-        reply_markup: JSON.stringify(keyboard)
+        reply_markup: JSON.stringify(keyboard),
+        disable_notification: true
     });
 
     logToSheet('DEBUG', `[handleNewChatMember] Send message result: ok=${sentMessage?.ok}, message_id=${sentMessage?.result?.message_id}`);
@@ -991,7 +992,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
         sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '✅ Проверка пройдена!' });
 
         const welcomeMsg = `${getMention(user)}, добро пожаловать!`;
-        const successMsg = sendTelegram('sendMessage', { chat_id: chat.id, text: welcomeMsg, parse_mode: 'HTML' });
+        const successMsg = sendTelegram('sendMessage', { chat_id: chat.id, text: welcomeMsg, parse_mode: 'HTML', disable_notification: true });
         if (successMsg?.ok) {
             addMessageToCleaner(chat.id, successMsg.result.message_id, 15, services);
             logEventTrace(config, 'callback_query', 'captcha_completed', 'Пользователь прошёл CAPTCHA успешно', {
@@ -1241,7 +1242,8 @@ function handleMessage(message, services, config) {
                 text: text,
                 parse_mode: 'HTML',
                 reply_markup: JSON.stringify(keyboard),
-                disable_web_page_preview: true
+                disable_web_page_preview: true,
+                disable_notification: true
             });
             if (sentWarning?.ok) {
                 addMessageToCleaner(chat.id, sentWarning.result.message_id, config.warning_message_timeout_sec, services);
