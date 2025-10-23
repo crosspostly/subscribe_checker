@@ -829,19 +829,18 @@ function handleNewChatMember(chatMember, services, config) {
         const fbCanRestrict = fallbackInfo?.result?.can_restrict_members === true || ['administrator', 'creator'].includes(String(fallbackInfo?.result?.status || ''));
         const fbCanDelete = fallbackInfo?.result?.can_delete_messages === true || ['administrator', 'creator'].includes(String(fallbackInfo?.result?.status || ''));
         if (!fallbackInfo?.ok || !(fbCanRestrict && fbCanDelete)) {
-            logToSheet('WARN', `[handleNewChatMember] Bot lacks required permissions in chat ${chat.id}. Cannot handle member events properly.`);
-            logToTestSheet('handleNewChatMember DEBUG', '⚠️ WARN', `Bot lacks permissions in chat ${chat.id}`, '');
-            logEventTrace(config, 'chat_member', 'error', 'У бота нет прав для обработки новых участников', {
+            // Продолжаем попытку restrict, даже если не смогли подтвердить права (пусть API ответ подтвердит/опровергнет)
+            logToSheet('WARN', `[handleNewChatMember] Bot permissions not confirmed in chat ${chat.id}. Will attempt restrict anyway.`);
+            logToTestSheet('handleNewChatMember DEBUG', '⚠️ WARN', `Permissions not confirmed; attempting restrict`, '');
+            logEventTrace(config, 'chat_member', 'warn', 'Права бота не подтверждены, пробуем restrict', {
                 chatId: chat.id,
-                userId: user.id,
-                canRestrict: botInfo?.result?.can_restrict_members,
-                canDelete: botInfo?.result?.can_delete_messages
+                userId: user.id
             });
-            return;
-        }
+        } else {
         // Use fallback flags if they passed
         canRestrict = true;
         canDelete = true;
+        }
     }
 
     // Apply CAPTCHA logic
