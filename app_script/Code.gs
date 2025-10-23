@@ -835,22 +835,23 @@ function handleNewChatMember(chatMember, services, config) {
     let canRestrict = botInfo?.result?.can_restrict_members === true || ['administrator', 'creator'].includes(String(botInfo?.result?.status || ''));
     let canDelete = botInfo?.result?.can_delete_messages === true || ['administrator', 'creator'].includes(String(botInfo?.result?.status || ''));
     if (!botInfo?.ok || !(canRestrict && canDelete)) {
-        // Fallback for test/mocked environments: try generic permission check
-        const fallbackInfo = sendTelegram('getChatMember', { chat_id: chat.id, user_id: '' });
-        const fbCanRestrict = fallbackInfo?.result?.can_restrict_members === true || ['administrator', 'creator'].includes(String(fallbackInfo?.result?.status || ''));
-        const fbCanDelete = fallbackInfo?.result?.can_delete_messages === true || ['administrator', 'creator'].includes(String(fallbackInfo?.result?.status || ''));
-        if (!fallbackInfo?.ok || !(fbCanRestrict && fbCanDelete)) {
+        // Альтернативная проверка: через список админов
+        try {
+            const adminsInfo = sendTelegram('getChatAdministrators', { chat_id: chat.id });
+            if (adminsInfo?.ok) {
+                const adminIds = (adminsInfo.result || []).map(a => a.user && a.user.id).filter(Boolean);
+                if (adminIds.includes(botId)) {
+                    canRestrict = true;
+                    canDelete = true;
+                }
+            }
+        } catch(_) {}
+
+        if (!canRestrict || !canDelete) {
             // Продолжаем попытку restrict, даже если не смогли подтвердить права (пусть API ответ подтвердит/опровергнет)
             logToSheet('WARN', `[handleNewChatMember] Bot permissions not confirmed in chat ${chat.id}. Will attempt restrict anyway.`);
             logToTestSheet('handleNewChatMember DEBUG', '⚠️ WARN', `Permissions not confirmed; attempting restrict`, '');
-            logEventTrace(config, 'chat_member', 'warn', 'Права бота не подтверждены, пробуем restrict', {
-                chatId: chat.id,
-                userId: user.id
-            });
-        } else {
-        // Use fallback flags if they passed
-        canRestrict = true;
-        canDelete = true;
+            logEventTrace(config, 'chat_member', 'warn', 'Права бота не подтверждены, пробуем restrict', { chatId: chat.id, userId: user.id });
         }
     }
 
@@ -897,7 +898,8 @@ function handleNewChatMember(chatMember, services, config) {
         chat_id: chat.id,
         text: text,
         parse_mode: 'HTML',
-        reply_markup: JSON.stringify(keyboard)
+        reply_markup: JSON.stringify(keyboard),
+        disable_notification: true
     });
 
     logToSheet('DEBUG', `[handleNewChatMember] Send message result: ok=${sentMessage?.ok}, message_id=${sentMessage?.result?.message_id}`);
@@ -991,7 +993,7 @@ function handleCallbackQuery(callbackQuery, services, config) {
         sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '✅ Проверка пройдена!' });
 
         const welcomeMsg = `${getMention(user)}, добро пожаловать!`;
-        const successMsg = sendTelegram('sendMessage', { chat_id: chat.id, text: welcomeMsg, parse_mode: 'HTML' });
+        const successMsg = sendTelegram('sendMessage', { chat_id: chat.id, text: welcomeMsg, parse_mode: 'HTML', disable_notification: true });
         if (successMsg?.ok) {
             addMessageToCleaner(chat.id, successMsg.result.message_id, 15, services);
             logEventTrace(config, 'callback_query', 'captcha_completed', 'Пользователь прошёл CAPTCHA успешно', {
@@ -1030,14 +1032,42 @@ function handleCallbackQuery(callbackQuery, services, config) {
         }
         
         // Check subscription
-        sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '⏳ Проверяем вашу подписку...', cache_time: 2 });
-        
-        const isMember = isUserSubscribed(user.id, config.target_channel_id);
-        
+        // Не кэшировать ответ на кнопку: Telegram может переиспользовать старый текст
+        sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: '⏳ Проверяем вашу подписку...', cache_time: 0 });
+
+        // Прямая проверка подписки с различением ошибок
+        let isMember = false;
+        let apiError = null;
+        try {
+            const resp = sendTelegram('getChatMember', { chat_id: config.target_channel_id, user_id: user.id });
+            if (resp && resp.ok) {
+                const status = resp.result && resp.result.status;
+                isMember = ['creator', 'administrator', 'member'].includes(String(status || ''));
+            } else {
+                apiError = resp;
+            }
+        } catch (e) {
+            apiError = { description: String(e && e.message ? e.message : e) };
+        }
+
+        if (apiError && apiError.description) {
+            const desc = String(apiError.description).toLowerCase();
+            const temporaryFailure = !(desc.includes('user not found') || desc.includes('user is not a member') || desc.includes('not found'));
+            if (temporaryFailure) {
+                // Временная ошибка проверки — краткий ответ и выходим
+                sendTelegram('answerCallbackQuery', { callback_query_id: callbackQuery.id, text: 'Извините, не удалось проверить подписку. Попробуйте ещё раз.', show_alert: true, cache_time: 0 });
+                logEventTrace(config, 'callback_query', 'check_failed', 'Не удалось проверить подписку (временная ошибка)', { chatId: chat.id, userId: user.id, error: apiError.description }, true);
+                // Удаляем системное сообщение с кнопкой, чтобы не вводить в заблуждение
+                try { deleteMessage(chat.id, messageId); } catch(_) {}
+                return;
+            }
+            // Для кейса user not found трактуем как не подписан
+        }
+
         if (isMember) {
             // User is subscribed - success
             services.cache.remove(`violations_${user.id}`);
-            const deleteResult = deleteMessage(chat.id, messageId);
+            let deleteResult = null; try { deleteResult = deleteMessage(chat.id, messageId); } catch(_) {}
             
             const successMsg = config.texts.sub_success_text.replace('{user_mention}', getMention(user));
             const sentMsg = sendTelegram('sendMessage', { 
@@ -1083,14 +1113,18 @@ function handleCallbackQuery(callbackQuery, services, config) {
                     ]
                 };
                 
-                const editResult = sendTelegram('editMessageText', {
+                // Если текст идентичен, не пытаемся редактировать
+                let editResult = { ok: true };
+                if (String(callbackQuery.message.text || '') !== String(updatedText || '')) {
+                  editResult = sendTelegram('editMessageText', {
                     chat_id: chat.id,
                     message_id: messageId,
                     text: updatedText,
                     parse_mode: 'HTML',
                     reply_markup: JSON.stringify(keyboard),
                     disable_web_page_preview: true
-                });
+                  });
+                }
                 
                 addMessageToCleaner(chat.id, messageId, 15, services);
                 logEventTrace(config, 'callback_query', 'subscription_pending', 'Пользователь ещё не подписан, сообщение обновлено', {
@@ -1109,14 +1143,17 @@ function handleCallbackQuery(callbackQuery, services, config) {
                 const updatedText = (config.texts.sub_fail_text || DEFAULT_CONFIG.texts.sub_fail_text)
                   .replace('{user_mention}', getMention(user).replace(/<[^>]*>/g, ''));
                 const keyboard = { inline_keyboard: [ [{ text: "✅ Я подписался", callback_data: `check_sub_${user.id}` }] ] };
-                const editResult = sendTelegram('editMessageText', {
+                let editResult = { ok: true };
+                if (String(callbackQuery.message.text || '') !== String(updatedText || '')) {
+                  editResult = sendTelegram('editMessageText', {
                     chat_id: chat.id,
                     message_id: messageId,
                     text: updatedText,
                     parse_mode: 'HTML',
                     reply_markup: JSON.stringify(keyboard),
                     disable_web_page_preview: true
-                });
+                  });
+                }
                 addMessageToCleaner(chat.id, messageId, 15, services);
                 logEventTrace(config, 'callback_query', 'subscription_pending', 'Нет URL канала, обновлено без ссылки', {
                     chatId: chat.id,
@@ -1241,7 +1278,8 @@ function handleMessage(message, services, config) {
                 text: text,
                 parse_mode: 'HTML',
                 reply_markup: JSON.stringify(keyboard),
-                disable_web_page_preview: true
+                disable_web_page_preview: true,
+                disable_notification: true
             });
             if (sentWarning?.ok) {
                 addMessageToCleaner(chat.id, sentWarning.result.message_id, config.warning_message_timeout_sec, services);
