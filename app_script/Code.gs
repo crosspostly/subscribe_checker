@@ -497,6 +497,20 @@ function handleUpdate(update) {
     setLoggingContext(config);
     logEventTrace(config, 'update', 'received', 'Получено новое обновление от Telegram', update);
 
+    // Идемпотентность: игнорируем дубликаты update_id в ближайшие 10 минут
+    try {
+        const updId = update && typeof update.update_id !== 'undefined' ? String(update.update_id) : '';
+        if (updId) {
+            const cache = CacheService.getScriptCache();
+            const key = `upd_${updId}`;
+            if (cache.get(key)) {
+                logEventTrace(config, 'update', 'ignored_duplicate', 'Дубликат update_id, пропуск', { update_id: updId }, true);
+                return;
+            }
+            cache.put(key, '1', 600); // 10 минут
+        }
+    } catch(_) {}
+
     if (!config.bot_enabled) {
         // Даже если бот выключен, для администратора в ЛС логируем факт доставки вебхука
         const chatTmp = update.message?.chat || update.callback_query?.message?.chat || update.chat_member?.chat || update.chat_join_request?.chat;
@@ -767,13 +781,10 @@ function handleNewChatMember(chatMember, services, config) {
     logToSheet('DEBUG', `[handleNewChatMember] Join analysis: from=${fromUser?.id}, user=${user.id}, isInitiatedByUser=${isInitiatedByUser}`);
     logToTestSheet('handleNewChatMember DEBUG', '🔍 DEBUG', `Join analysis: from=${fromUser?.id}, user=${user.id}, isInitiatedByUser=${isInitiatedByUser}`, '');
     
-    // Define what constitutes a "real join" requiring CAPTCHA
-    // Real join = user-initiated AND transitioning to 'member' from a non-member state
-    // IMPORTANT: restricted->member is NOT a real join (user already passed CAPTCHA)
-    const isRealJoin = isInitiatedByUser && (
-        // Standard join: left/kicked -> member (but NOT restricted -> member!)
+    // Реальным вступлением считаем переход в 'member' из left/kicked/нет статуса
+    // (в том числе при приглашении админом). restricted->member по-прежнему не считаем новым вступлением.
+    const isRealJoin = (
         ((oldStatus === 'left' || oldStatus === 'kicked') && newStatus === 'member') ||
-        // First time join: no old status -> member  
         (!oldStatus && newStatus === 'member')
     );
     
